@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.14.0";
+    var PLUGIN_VERSION = "0.15.0";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -65,6 +65,7 @@ window.__ModuleLoader__.load({
 
     // 轮询节奏与日志单次读取上限（与 SPEC 2.2 一致）。
     var STATUS_POLL_MS = 2000;
+    var DIAGNOSE_POLL_MS = 6000;
     var LOG_POLL_MS = 1000;
     var LOG_MAX_BYTES = 65536;
 
@@ -183,6 +184,7 @@ window.__ModuleLoader__.load({
       ".dshRunnerRow[data-disabled=true]{opacity:.55}",
       ".dshRunnerDot{width:7px;height:7px;border-radius:50%;margin-top:6px;flex:none;background:rgba(128,128,128,.6)}",
       ".dshRunnerDot[data-status=starting]{background:#f59e0b}",
+      ".dshRunnerDot[data-status=external]{background:#f59e0b;box-shadow:0 0 0 2px rgba(245,158,11,.25)}",
       ".dshRunnerDot[data-status=running]{background:#22c55e}",
       ".dshRunnerDot[data-status=stopping]{background:#f59e0b}",
       ".dshRunnerDot[data-status=failed]{background:#f87171}",
@@ -193,6 +195,7 @@ window.__ModuleLoader__.load({
       ".dshRunnerStateText{font-size:10px;line-height:14px;opacity:.65;flex:none;white-space:nowrap}",
       ".dshRunnerStateText[data-status=running]{color:#22c55e;opacity:1}",
       ".dshRunnerStateText[data-status=starting],.dshRunnerStateText[data-status=stopping]{color:#f59e0b;opacity:1}",
+      ".dshRunnerStateText[data-status=external]{color:#f59e0b;opacity:1}",
       ".dshRunnerStateText[data-status=failed],.dshRunnerStateText[data-status=exited]{color:#f87171;opacity:1}",
       ".dshRunnerRowCmd{font-size:10px;line-height:14px;opacity:.55;font-family:ui-monospace,Consolas,'Courier New',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
       ".dshRunnerRowMeta{display:flex;align-items:center;gap:5px;flex-wrap:wrap;font-size:10px;line-height:14px;opacity:.75;min-width:0}",
@@ -209,10 +212,6 @@ window.__ModuleLoader__.load({
       ".dshRunnerLogTitle{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 120px}",
       ".dshRunnerLogMeta{font-size:10px;opacity:.55;white-space:nowrap;flex:none}",
       ".dshRunnerPre{flex:1;min-height:140px;margin:0;padding:8px 10px;overflow:auto;font-family:ui-monospace,Consolas,'Courier New',monospace;font-size:11px;line-height:16px;white-space:pre-wrap;word-break:break-all;user-select:text;background:rgba(0,0,0,.18);color:inherit}",
-      ".dshRunnerDiag{display:flex;flex-direction:column;gap:4px;flex:none}",
-      ".dshRunnerDiagTitle{font-size:11px;font-weight:600;line-height:16px;opacity:.85}",
-      ".dshRunnerDiagRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;line-height:16px;padding:5px 9px;border:.5px solid rgba(245,158,11,.38);border-radius:8px;background:rgba(245,158,11,.07)}",
-      ".dshRunnerDiagText{flex:1 1 200px;min-width:0;word-break:break-word}",
       ".dshRunnerError{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;border:.5px solid rgba(239,68,68,.45);background:rgba(239,68,68,.08);color:#f87171;border-radius:8px;padding:7px 9px;font-size:11px;line-height:16px;flex:none}",
       ".dshRunnerErrorText{flex:1 1 220px;min-width:0;word-break:break-word}",
       ".dshRunnerErrorDetail{flex:0 0 100%;opacity:.85;font-family:ui-monospace,Consolas,'Courier New',monospace;font-size:10px;line-height:15px;word-break:break-word}",
@@ -308,11 +307,6 @@ window.__ModuleLoader__.load({
         /* 复制失败由调用方提示 */
       }
       return false;
-    }
-
-    function confirmAction(text) {
-      if (typeof window === "undefined" || typeof window.confirm !== "function") return false;
-      return window.confirm(text) === true;
     }
 
     // =====================================================================
@@ -660,7 +654,23 @@ window.__ModuleLoader__.load({
       return list;
     }
 
+    /** 某条命令的声明端口是否被「非托管」进程占用（用于把外部运行中的服务显示到行上）。 */
+    function externalOccupancyForCommand(entries, commandId) {
+      if (!Array.isArray(entries)) return undefined;
+      for (var i = 0; i < entries.length; i += 1) {
+        var entry = entries[i];
+        if (entry === null || entry === undefined) continue;
+        if (entry.commandId !== commandId) continue;
+        if (entry.listening !== true) continue;
+        if (entry.occupant === null || entry.occupant === undefined) continue;
+        if (entry.occupant.managed === true) continue;
+        return entry;
+      }
+      return undefined;
+    }
+
     function runnerStatusText(status) {
+      if (status === "external") return "外部运行中";
       if (status === "starting") return "启动中";
       if (status === "running") return "运行中";
       if (status === "stopping") return "停止中";
@@ -1720,20 +1730,33 @@ window.__ModuleLoader__.load({
         pre.scrollTop = pre.scrollHeight;
       }, [logState]);
 
-      // 命中项目后：读配置 + 做一次端口诊断。
+      // 命中项目后：读配置 + 周期性端口诊断（外部进程可能在本面板打开之后才启动）。
       react.useEffect(function () {
         if (!hasProject) return undefined;
         var alive = true;
+        var timer = null;
         loadConfig().catch(function (loadError) {
           if (alive) setError(loadError);
         });
-        rpc("project/diagnose", { projectPath: projectPath }).then(function (value) {
-          if (alive && value !== null && value !== undefined) setDiagnose(Array.isArray(value.entries) ? value.entries : []);
-        }, function (diagnoseError) {
-          if (alive) setError(diagnoseError);
-        });
+        async function tickDiagnose() {
+          if (!alive) return;
+          if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+            timer = setTimeout(tickDiagnose, DIAGNOSE_POLL_MS);
+            return;
+          }
+          try {
+            var value = await rpc("project/diagnose", { projectPath: projectPath });
+            if (!alive) return;
+            setDiagnose(value !== null && value !== undefined && Array.isArray(value.entries) ? value.entries : []);
+          } catch (diagnoseError) {
+            if (alive) setError(diagnoseError);
+          }
+          if (alive) timer = setTimeout(tickDiagnose, DIAGNOSE_POLL_MS);
+        }
+        tickDiagnose();
         return function () {
           alive = false;
+          clearTimeout(timer);
         };
       }, [hasProject, projectPath]);
 
@@ -1912,30 +1935,17 @@ window.__ModuleLoader__.load({
         }
       }
 
-      async function handleKillPort(entry) {
-        if (!hasProject || busy !== null || entry === null || entry === undefined) return;
-        var port = entry.port;
-        var occupant = entry.occupant === null || entry.occupant === undefined ? undefined : entry.occupant;
-        var windowText = occupant !== undefined && typeof occupant.windowTitle === "string" && occupant.windowTitle !== ""
-          ? "（窗口：" + occupant.windowTitle + "）"
-          : "";
-        var owner = "端口 " + String(port) + " 被 " + occupantSummary(occupant) + windowText + " 占用，确定结束该进程吗？"
-          + (occupant !== undefined && typeof occupant.commandLine === "string" && occupant.commandLine !== "" ? "\n\n" + occupant.commandLine : "");
-        if (!confirmAction(owner)) return;
-        setBusy("kill-" + String(port));
+      /** 行内「结束并启动」：用诊断到的外部占用者直接打开端口冲突对话框。 */
+      function openExternalConflict(entry, commandId) {
+        if (!hasProject || entry === null || entry === undefined) return;
         setError(null);
-        try {
-          await rpc("project/killPort", {
-            projectPath: projectPath,
-            port: port,
-            pid: occupant !== undefined && typeof occupant.pid === "number" ? occupant.pid : undefined
-          });
-          await refreshDiagnose();
-        } catch (killError) {
-          setError(killError);
-        } finally {
-          setBusy(null);
-        }
+        setConflict({
+          commandId: commandId,
+          action: "start",
+          kind: "port-conflict",
+          ports: [{ port: entry.port, occupant: entry.occupant }],
+          actualPorts: []
+        });
       }
 
       async function clearLog() {
@@ -2080,7 +2090,11 @@ window.__ModuleLoader__.load({
 
       function renderRow(command) {
         var current = runnerByCommand[command.id];
-        var status = current !== null && current !== undefined && typeof current.status === "string" ? current.status : "idle";
+        var hasRunner = current !== null && current !== undefined;
+        var external = externalOccupancyForCommand(diagnose, command.id);
+        var status = hasRunner && typeof current.status === "string"
+          ? current.status
+          : (external !== undefined ? "external" : "idle");
         var disabled = command.enabled === false;
         var active = status === "starting" || status === "running" || status === "stopping";
         var rowBusy = busy !== null;
@@ -2103,6 +2117,21 @@ window.__ModuleLoader__.load({
         if (current !== null && current !== undefined && (current.status === "exited" || current.status === "failed")
           && typeof current.exitCode === "number") {
           meta.push(h("span", { key: "exit", className: "dshRunnerStatusText" }, "退出码 " + current.exitCode));
+        }
+        if (!hasRunner && external !== undefined) {
+          var externalOccupant = external.occupant;
+          var externalText = "外部进程"
+            + (externalOccupant !== undefined && typeof externalOccupant.pid === "number" ? " PID " + externalOccupant.pid : "")
+            + (externalOccupant !== undefined && externalOccupant.related === true ? " · 疑似同项目旧实例" : "");
+          meta.push(h("span", {
+            key: "external",
+            className: "dshRunnerStatusText",
+            "data-status": "external",
+            title: externalOccupant !== undefined && typeof externalOccupant.commandLine === "string" ? externalOccupant.commandLine : ""
+          }, externalText));
+          if (externalOccupant !== undefined && typeof externalOccupant.windowTitle === "string" && externalOccupant.windowTitle !== "") {
+            meta.push(h("span", { key: "external-window", className: "dshRunnerStatusText", title: externalOccupant.windowTitle }, "窗口：" + externalOccupant.windowTitle));
+          }
         }
         return h("div", {
           key: command.id,
@@ -2144,13 +2173,14 @@ window.__ModuleLoader__.load({
             h("button", {
               type: "button",
               className: "dshRunnerMiniBtn",
-              "data-action": "start",
+              "data-action": !hasRunner && external !== undefined ? "kill-and-start" : "start",
               disabled: rowBusy || disabled || active,
               onClick: function (event) {
                 event.stopPropagation();
-                runAction("start", command.id);
+                if (!hasRunner && external !== undefined) openExternalConflict(external, command.id);
+                else runAction("start", command.id);
               }
-            }, "启动"),
+            }, !hasRunner && external !== undefined ? "结束并启动" : "启动"),
             h("button", {
               type: "button",
               className: "dshRunnerMiniBtn",
@@ -2165,7 +2195,7 @@ window.__ModuleLoader__.load({
               type: "button",
               className: "dshRunnerMiniBtn",
               "data-action": "restart",
-              disabled: rowBusy || disabled,
+              disabled: rowBusy || disabled || (!hasRunner && external !== undefined),
               onClick: function (event) {
                 event.stopPropagation();
                 runAction("restart", command.id);
@@ -2208,39 +2238,6 @@ window.__ModuleLoader__.load({
           ? "点左侧命令行查看运行日志。"
           : (logText === "" ? "（暂无日志）" : logText)));
 
-      var unmanaged = [];
-      for (var diagIndex = 0; diagIndex < diagnose.length; diagIndex += 1) {
-        var entry = diagnose[diagIndex];
-        if (entry !== null && entry !== undefined && entry.listening === true
-          && entry.occupant !== null && entry.occupant !== undefined && entry.occupant.managed !== true) {
-          unmanaged.push(entry);
-        }
-      }
-
-      var diagnoseSection = unmanaged.length === 0 ? null : h("div", { className: "dshRunnerDiag" },
-        h("div", { className: "dshRunnerDiagTitle" }, "端口诊断：检测到未托管的端口占用"),
-        unmanaged.map(function (item) {
-          var occupant = item.occupant;
-          var windowText = occupant !== undefined && typeof occupant.windowTitle === "string" && occupant.windowTitle !== ""
-            ? " · 窗口：" + occupant.windowTitle
-            : "";
-          var chain = formatProcessChain(occupant);
-          var ownerText = "端口 " + String(item.port) + " 被 " + occupantSummary(occupant) + " 占用"
-            + (typeof item.title === "string" && item.title !== "" ? "（期望命令：" + item.title + "）" : "")
-            + windowText
-            + (chain !== "" ? " · 父进程：" + chain : "")
-            + (occupant !== undefined && typeof occupant.commandLine === "string" && occupant.commandLine !== "" ? " · " + occupant.commandLine : "");
-          return h("div", { key: "diag-" + String(item.port), className: "dshRunnerDiagRow" },
-            h("span", { className: "dshRunnerDiagText" }, ownerText),
-            h("button", {
-              type: "button",
-              className: "dshRunnerMiniBtn",
-              "data-action": "kill-port",
-              "data-port": item.port,
-              disabled: busy !== null,
-              onClick: function () { handleKillPort(item); }
-            }, "结束占用进程"));
-        }));
 
       function renderConflictEntry(item, index) {
         var occupant = item !== null && item !== undefined && item.occupant !== null && item.occupant !== undefined
@@ -2373,7 +2370,6 @@ window.__ModuleLoader__.load({
                   "当前项目还没有命令。点右上角「管理命令」新增，或在「设置 → dsh-runner」里编辑。"))
             : h("div", { className: "dshRunnerList" }, commands.map(renderRow)),
           logPane),
-        diagnoseSection,
         conflictDialog,
         editorModal);
     }
@@ -2671,6 +2667,7 @@ window.__ModuleLoader__.load({
       commandMatchesProject: commandMatchesProject,
       visibleCommandsForProject: visibleCommandsForProject,
       runnerStatusText: runnerStatusText,
+      externalOccupancyForCommand: externalOccupancyForCommand,
       occupantSummary: occupantSummary,
       formatProcessChain: formatProcessChain,
       formatProcessChildren: formatProcessChildren

@@ -417,7 +417,10 @@ try {
 
   // (ii) 启动后声明端口被外部进程占用、命令降级 -> port-mismatch 且带占用者/related
   const [racePort, raceFallback] = await getFreePorts(2);
-  const relatedOccupantScript = path.join(projectRoot, "occupant-related.cjs");
+  // 用中文目录做 cwd：验证进程命令行不是乱码、related 能正确命中。
+  const relatedDir = path.join(dir, "中文项目");
+  await mkdir(relatedDir, { recursive: true });
+  const relatedOccupantScript = path.join(relatedDir, "occupant-related.cjs");
   await writeFile(relatedOccupantScript, [
     'const net = require("node:net");',
     'const server = net.createServer((socket) => socket.end());',
@@ -429,6 +432,7 @@ try {
     id: "contract-race",
     title: "竞态降级",
     command: 'node "' + mismatchScript + '"',
+    cwd: relatedDir,
     ports: [racePort],
     readyPort: racePort,
     readyTimeoutMs: 12000,

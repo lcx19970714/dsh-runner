@@ -1,8 +1,8 @@
-// dsh-runner 0.14.0 的离线冒烟测试（CI 与本地都用它）。
+// dsh-runner 0.15.0 的离线冒烟测试（CI 与本地都用它）。
 //
 // 覆盖（SPEC 第 5 节 smoke 要求）：
 // 1. 用假的 window.__ModuleLoader__ / react / localStorage 执行 client.js，确认模块 id 与注入；
-// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.14.0）；
+// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.15.0）；
 // 3. slot 注册集合恰为 6 个：conversation.composer.dock / main / sidebar.panellist /
 //    settings.section / plugins.detail.badge / plugins.detail.section；
 // 4. __test 纯函数断言：stripAnsi / formatUptime / formatBytes / commandMatchesProject /
@@ -61,6 +61,7 @@ assert.deepEqual(
   Object.keys(__test).sort(),
   [
     "commandMatchesProject",
+    "externalOccupancyForCommand",
     "formatBytes",
     "formatProcessChain",
     "formatProcessChildren",
@@ -77,7 +78,7 @@ assert.deepEqual(
 const versionMatch = /var PLUGIN_VERSION = "([^"]+)";/.exec(source);
 assert.ok(versionMatch !== null, "client.js 必须有 PLUGIN_VERSION 常量");
 assert.equal(versionMatch[1], manifest.version, "PLUGIN_VERSION 必须与 package.json version 一致");
-assert.equal(manifest.version, "0.14.0", "目标版本是 0.14.0");
+assert.equal(manifest.version, "0.15.0", "目标版本是 0.15.0");
 
 // ---- 4. 纯函数断言 ----
 assert.equal(__test.stripAnsi("\u001b[31mred\u001b[0m"), "red");
@@ -152,6 +153,17 @@ assert.equal(__test.formatProcessChain(occupantFixture), "cmd.exe（1234） ← 
 assert.equal(__test.formatProcessChain(undefined), "");
 assert.equal(__test.formatProcessChildren(occupantFixture), "esbuild.exe（5555）");
 assert.equal(__test.formatProcessChildren(undefined), "");
+
+const diagnoseFixture = [
+  { port: 6101, listening: true, commandId: "managed", occupant: { pid: 11, managed: true } },
+  { port: 6102, listening: false, commandId: "idle" },
+  { port: 6103, listening: true, commandId: "external", occupant: { pid: 33, managed: false, related: true } }
+];
+assert.equal(__test.externalOccupancyForCommand(diagnoseFixture, "managed"), undefined, "托管端口不算外部占用");
+assert.equal(__test.externalOccupancyForCommand(diagnoseFixture, "idle"), undefined, "未监听不算外部占用");
+const externalEntry = __test.externalOccupancyForCommand(diagnoseFixture, "external");
+assert.equal(externalEntry.port, 6103);
+assert.equal(__test.externalOccupancyForCommand(null, "external"), undefined);
 assert.equal(__test.runnerStatusText("failed"), "启动失败");
 assert.equal(__test.runnerStatusText("idle"), "未运行");
 

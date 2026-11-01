@@ -198,6 +198,8 @@ function queryProcessTree() {
     return map;
   }
   const script = [
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    "$OutputEncoding = [Console]::OutputEncoding",
     "$procs = Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name",
     "if ($null -eq $procs) { throw 'Get-CimInstance Win32_Process 返回空' }",
     "$rows = foreach ($p in $procs) { [pscustomobject]@{ pid = [int]$p.ProcessId; ppid = [int]$p.ParentProcessId; name = [string]$p.Name } }",
@@ -357,7 +359,8 @@ function queryProcessTable(pids) {
     return map;
   }
   const filter = ids.map((pid) => "ProcessId=" + String(pid)).join(" OR ");
-  const script = "Get-CimInstance Win32_Process -Filter \"" + filter + "\" | ForEach-Object { \"$($_.ProcessId)|$($_.Name)|$($_.CommandLine)\" }";
+  const script = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; "
+    + "Get-CimInstance Win32_Process -Filter \"" + filter + "\" | ForEach-Object { \"$($_.ProcessId)|$($_.Name)|$($_.CommandLine)\" }";
   const result = spawnSync(resolvePowerShell(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
     encoding: "utf8",
     windowsHide: true,
@@ -404,6 +407,8 @@ function queryProcessSnapshot() {
     return map;
   }
   const script = [
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    "$OutputEncoding = [Console]::OutputEncoding",
     "$procs = Get-CimInstance Win32_Process",
     "if ($null -eq $procs) { throw 'Get-CimInstance Win32_Process 返回空' }",
     "$wins = @{}",
@@ -546,7 +551,7 @@ export class ProjectRunnerService {
   }
 
   key(projectPath, commandId) {
-    return normalizeProjectPath(projectPath) + "\u0000" + String(commandId);
+    return normalizeProjectPath(projectPath) + "::" + String(commandId);
   }
 
   /** 幂等初始化：对账上次 Host 留下的状态。RPC / Tool 使用前必须 await。 */
@@ -580,7 +585,7 @@ export class ProjectRunnerService {
         }
         continue;
       }
-      const key = typeof entry.key === "string" && entry.key !== "" ? entry.key : this.key(entry.projectPath, entry.commandId);
+      const key = typeof entry.key === "string" && entry.key !== "" ? entry.key.replaceAll("\u0000", "::") : this.key(entry.projectPath, entry.commandId);
       if (this.records.has(key)) continue;
       const readyPort = Number.isInteger(entry.readyPort) ? entry.readyPort : null;
       const ready = readyPort === null ? null : await canConnectAny(readyPort);
@@ -1383,11 +1388,11 @@ export class ProjectRunnerService {
       status: record.status,
       ready: record.ready === undefined ? null : record.ready,
       actualPorts: Array.isArray(record.actualPorts) ? record.actualPorts.slice() : [],
-      exitCode: record.exitCode,
-      pid: record.pid,
-      startedAt: record.startedAt,
+      exitCode: record.exitCode === undefined ? null : record.exitCode,
+      pid: record.pid === undefined ? null : record.pid,
+      startedAt: Number.isFinite(record.startedAt) ? record.startedAt : Date.now(),
       logPath: record.logPath,
-      logBytes: this.logBytes(record.logPath),
+      logBytes: Number.isFinite(this.logBytes(record.logPath)) ? this.logBytes(record.logPath) : 0,
       adopted: record.adopted === true
     };
   }
@@ -1439,7 +1444,7 @@ export class ProjectRunnerService {
         readyTimeoutMs: record.readyTimeoutMs,
         logPath: record.logPath,
         marker: record.marker,
-        pid: record.pid,
+        pid: record.pid === undefined ? null : record.pid,
         startedAt: record.startedAt
       });
     }
