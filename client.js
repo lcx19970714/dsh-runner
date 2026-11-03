@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.16.0";
+    var PLUGIN_VERSION = "0.16.1";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -2303,6 +2303,8 @@ window.__ModuleLoader__.load({
         var active = status === "starting" || status === "running" || status === "stopping";
         var rowBusy = busy !== null;
         var canAct = projectPath !== undefined && projectPath !== null && projectPath !== "";
+        // 配置里已不存在的历史 runner：可以停止，但不能按旧 commandId 再启动。
+        var canStart = canAct && row.runnerOnly !== true;
         var declaredPorts = Array.isArray(command.ports) ? command.ports : [];
         var actualPorts = current !== null && current !== undefined && Array.isArray(current.actualPorts)
           ? current.actualPorts
@@ -2385,7 +2387,7 @@ window.__ModuleLoader__.load({
               type: "button",
               className: "dshRunnerMiniBtn",
               "data-action": !hasRunner && external !== undefined ? "kill-and-start" : "start",
-              disabled: rowBusy || disabled || active || !canAct,
+              disabled: rowBusy || disabled || active || !canStart,
               onClick: function (event) {
                 event.stopPropagation();
                 if (!hasRunner && external !== undefined) openExternalConflict(external, command.id, projectPath);
@@ -2406,7 +2408,7 @@ window.__ModuleLoader__.load({
               type: "button",
               className: "dshRunnerMiniBtn",
               "data-action": "restart",
-              disabled: rowBusy || disabled || (!hasRunner && external !== undefined) || !canAct,
+              disabled: rowBusy || disabled || (!hasRunner && external !== undefined) || !canStart,
               onClick: function (event) {
                 event.stopPropagation();
                 runAction("restart", command.id, projectPath);
