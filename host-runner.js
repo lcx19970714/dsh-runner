@@ -1111,17 +1111,35 @@ export class ProjectRunnerService {
   }
 
   /** 端口诊断：项目内每条命令的每个 ports 端口一项，附带占用者完整信息与托管归属。 */
+  /** 端口诊断：显式 projectPath 时只看该项目；省略时覆盖所有 project 作用域命令（按各自 projectRoot 标注）。 */
   async diagnose(commands, projectPath) {
     await this.init();
     if (!Array.isArray(commands)) throw new RunnerError("bad-request", "diagnose 需要命令列表", {});
-    const relevant = commands.filter((command) => {
-      return command !== null && typeof command === "object"
-        && Array.isArray(command.ports) && command.ports.length > 0
-        && commandMatchesProject(command, projectPath);
-    });
+    const scopedProjectPath = typeof projectPath === "string" && projectPath.trim() !== "" ? projectPath.trim() : undefined;
+    const targets = [];
+    for (const command of commands) {
+      if (command === null || typeof command !== "object") continue;
+      if (!Array.isArray(command.ports) || command.ports.length === 0) continue;
+      let targetPath;
+      if (command.scope === "project") {
+        if (scopedProjectPath === undefined) {
+          const root = typeof command.projectRoot === "string" ? command.projectRoot.trim() : "";
+          if (root === "") continue;
+          targetPath = root;
+        } else {
+          if (!commandMatchesProject(command, scopedProjectPath)) continue;
+          targetPath = scopedProjectPath;
+        }
+      } else {
+        // 全局命令只有落在具体项目上才有端口语义。
+        if (scopedProjectPath === undefined) continue;
+        targetPath = scopedProjectPath;
+      }
+      targets.push({ command: command, projectPath: targetPath });
+    }
     const ports = [];
-    for (const command of relevant) {
-      for (const port of command.ports) {
+    for (const target of targets) {
+      for (const port of target.command.ports) {
         if (Number.isInteger(port) && ports.indexOf(port) === -1) ports.push(port);
       }
     }
@@ -1136,7 +1154,8 @@ export class ProjectRunnerService {
       }
     }
     const entries = [];
-    for (const command of relevant) {
+    for (const target of targets) {
+      const command = target.command;
       for (const port of command.ports) {
         if (!Number.isInteger(port)) continue;
         const owners = listeners.byPort.get(port);
@@ -1145,17 +1164,19 @@ export class ProjectRunnerService {
           port: port,
           listening: listening,
           commandId: command.id,
-          title: command.title
+          title: command.title,
+          projectPath: target.projectPath
         };
         if (listening) {
           const pid = [...owners][0];
           const occupant = describeOccupant(pid, snapshot);
-          markOccupantRelated(occupant, command.projectRoot, command.cwd);
+          markOccupantRelated(occupant, target.projectPath, command.cwd);
           const managed = this.findManagedRunner(pid, snapshot);
           occupant.managed = managed.managed;
           if (managed.runnerCommandId !== undefined) {
             occupant.runnerCommandId = managed.runnerCommandId;
-            const record = [...this.records.values()].find((item) => item.commandId === managed.runnerCommandId);
+            const record = [...this.records.values()].find((item) => item.commandId === managed.runnerCommandId
+              && samePath(item.projectPath, target.projectPath));
             if (record !== undefined) occupant.runnerTitle = record.title;
           }
           entry.occupant = occupant;

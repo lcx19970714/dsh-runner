@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.15.0";
+    var PLUGIN_VERSION = "0.16.0";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -177,6 +177,15 @@ window.__ModuleLoader__.load({
       ".dshRunnerBody{display:grid;grid-template-columns:minmax(300px,42%) minmax(0,1fr);gap:10px;flex:1;min-height:0}",
       "@media (max-width:860px){.dshRunnerBody{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,auto) minmax(160px,1fr)}}",
       ".dshRunnerList{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:auto;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));border-radius:10px;background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.05))}",
+      ".dshRunnerSection{display:flex;flex-direction:column;gap:2px;flex:none;margin-bottom:8px}",
+      ".dshRunnerSectionHead{display:flex;align-items:center;gap:8px;padding:4px 2px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28))}",
+      ".dshRunnerSectionInfo{display:flex;align-items:baseline;gap:6px;min-width:0;flex:1 1 auto}",
+      ".dshRunnerSectionTitle{font-size:11px;font-weight:600;line-height:16px;white-space:nowrap}",
+      ".dshRunnerSectionPath{font-size:10px;line-height:15px;opacity:.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1 1 auto;font-family:ui-monospace,Consolas,'Courier New',monospace}",
+      ".dshRunnerSectionCount{font-size:10px;line-height:15px;opacity:.6;white-space:nowrap}",
+      ".dshRunnerSectionActions{display:flex;gap:4px;flex:none}",
+      ".dshRunnerSectionEmpty{font-size:11px;line-height:16px;opacity:.55;padding:6px 8px}",
+      ".dshRunnerGlobalSummary{font-size:10px;line-height:15px;opacity:.6;white-space:nowrap}",
       ".dshRunnerRow{display:flex;align-items:flex-start;gap:7px;padding:8px 10px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.22));min-width:0;cursor:pointer}",
       ".dshRunnerRow:last-child{border-bottom:0}",
       ".dshRunnerRow:hover{background:rgba(103,158,254,.06)}",
@@ -654,9 +663,10 @@ window.__ModuleLoader__.load({
       return list;
     }
 
-    /** 某条命令的声明端口是否被「非托管」进程占用（用于把外部运行中的服务显示到行上）。 */
-    function externalOccupancyForCommand(entries, commandId) {
+    /** 某条命令的声明端口是否被「非托管」进程占用（按项目 + commandId 定位，用于显示外部运行中）。 */
+    function externalOccupancyForCommand(entries, commandId, projectPath) {
       if (!Array.isArray(entries)) return undefined;
+      var wantedPath = typeof projectPath === "string" && projectPath !== "" ? normalizePath(projectPath) : null;
       for (var i = 0; i < entries.length; i += 1) {
         var entry = entries[i];
         if (entry === null || entry === undefined) continue;
@@ -664,9 +674,60 @@ window.__ModuleLoader__.load({
         if (entry.listening !== true) continue;
         if (entry.occupant === null || entry.occupant === undefined) continue;
         if (entry.occupant.managed === true) continue;
+        if (wantedPath !== null && typeof entry.projectPath === "string" && normalizePath(entry.projectPath) !== wantedPath) continue;
         return entry;
       }
       return undefined;
+    }
+
+    /**
+     * 全局运行面板分组：project 命令按 projectRoot 分组；global 命令跟随当前项目（无当前项目时单列）。
+     * 返回 [{ key, projectPath, global, commands }]，当前项目优先、其余按路径排序、全局最后。
+     */
+    function buildRunnerSections(config, currentProjectPath) {
+      var commands = commandsOf(config);
+      var sections = [];
+      var byKey = {};
+      var currentKey = typeof currentProjectPath === "string" && currentProjectPath !== "" ? normalizePath(currentProjectPath) : null;
+      function sectionFor(pathValue) {
+        var key = normalizePath(pathValue);
+        if (byKey[key] === undefined) {
+          var section = { key: key, projectPath: pathValue, global: false, commands: [] };
+          byKey[key] = section;
+          sections.push(section);
+        }
+        return byKey[key];
+      }
+      function globalSection() {
+        if (byKey.__global__ === undefined) {
+          var section = { key: "__global__", projectPath: undefined, global: true, commands: [] };
+          byKey.__global__ = section;
+          sections.push(section);
+        }
+        return byKey.__global__;
+      }
+      for (var i = 0; i < commands.length; i += 1) {
+        var command = commands[i];
+        if (command === null || command === undefined) continue;
+        if (command.scope === "global") {
+          if (currentKey !== null) sectionFor(currentProjectPath).commands.push(command);
+          else globalSection().commands.push(command);
+          continue;
+        }
+        var root = typeof command.projectRoot === "string" ? command.projectRoot.trim() : "";
+        if (root === "") continue;
+        sectionFor(root).commands.push(command);
+      }
+      sections.sort(function (left, right) {
+        if (left.global !== right.global) return left.global ? 1 : -1;
+        var leftCurrent = currentKey !== null && left.key === currentKey;
+        var rightCurrent = currentKey !== null && right.key === currentKey;
+        if (leftCurrent !== rightCurrent) return leftCurrent ? -1 : 1;
+        if (left.key < right.key) return -1;
+        if (left.key > right.key) return 1;
+        return 0;
+      });
+      return sections;
     }
 
     function runnerStatusText(status) {
@@ -1681,10 +1742,11 @@ window.__ModuleLoader__.load({
     function RunnerPage(props) {
       var active = useActiveSession(props);
       var config = useConfig();
-      var projectPath = active !== null && active !== undefined && typeof active.projectPath === "string"
+      var currentProjectPath = active !== null && active !== undefined
+        && typeof active.projectPath === "string" && active.projectPath !== ""
         ? active.projectPath
         : undefined;
-      var hasProject = projectPath !== undefined && projectPath !== "";
+      var workspaceOptions = workspaceOptionsFrom(props !== undefined ? props.useWorkspaces : undefined);
 
       var runnersPair = react.useState([]);
       var runners = runnersPair[0];
@@ -1693,8 +1755,8 @@ window.__ModuleLoader__.load({
       var diagnose = diagnosePair[0];
       var setDiagnose = diagnosePair[1];
       var selectedPair = react.useState(null);
-      var selectedId = selectedPair[0];
-      var setSelectedId = selectedPair[1];
+      var selected = selectedPair[0];
+      var setSelected = selectedPair[1];
       var logPair = react.useState(null);
       var logState = logPair[0];
       var setLogState = logPair[1];
@@ -1730,14 +1792,21 @@ window.__ModuleLoader__.load({
         pre.scrollTop = pre.scrollHeight;
       }, [logState]);
 
-      // 命中项目后：读配置 + 周期性端口诊断（外部进程可能在本面板打开之后才启动）。
+      // 读配置；面板是全局视图，不依赖当前会话项目。
       react.useEffect(function () {
-        if (!hasProject) return undefined;
         var alive = true;
-        var timer = null;
         loadConfig().catch(function (loadError) {
           if (alive) setError(loadError);
         });
+        return function () {
+          alive = false;
+        };
+      }, []);
+
+      // 端口诊断：每 6 秒一次，覆盖所有项目的 project 命令（页面隐藏时跳过）。
+      react.useEffect(function () {
+        var alive = true;
+        var timer = null;
         async function tickDiagnose() {
           if (!alive) return;
           if (typeof document !== "undefined" && document.visibilityState === "hidden") {
@@ -1745,7 +1814,7 @@ window.__ModuleLoader__.load({
             return;
           }
           try {
-            var value = await rpc("project/diagnose", { projectPath: projectPath });
+            var value = await rpc("project/diagnose", {});
             if (!alive) return;
             setDiagnose(value !== null && value !== undefined && Array.isArray(value.entries) ? value.entries : []);
           } catch (diagnoseError) {
@@ -1758,14 +1827,10 @@ window.__ModuleLoader__.load({
           alive = false;
           clearTimeout(timer);
         };
-      }, [hasProject, projectPath]);
+      }, []);
 
-      // 进程状态：每 2000ms 轮询 project/status（页面卸载清理）。
+      // 进程状态：每 2000ms 轮询全部项目的 runner（页面卸载清理）。
       react.useEffect(function () {
-        if (!hasProject) {
-          setRunners([]);
-          return undefined;
-        }
         var alive = true;
         var timer = null;
         function schedule() {
@@ -1773,7 +1838,7 @@ window.__ModuleLoader__.load({
         }
         async function tick() {
           try {
-            var value = await rpc("project/status", { projectPath: projectPath });
+            var value = await rpc("project/status", {});
             if (!alive) return;
             setRunners(value !== null && value !== undefined && Array.isArray(value.runners) ? value.runners : []);
           } catch (statusError) {
@@ -1786,23 +1851,25 @@ window.__ModuleLoader__.load({
           alive = false;
           clearTimeout(timer);
         };
-      }, [hasProject, projectPath]);
+      }, []);
 
-      // 选中命令后：每 1000ms 轮询 project/log（maxBytes 65536）。
+      // 选中的命令：每 1000ms 轮询 project/log（maxBytes 65536）。
       react.useEffect(function () {
-        if (!hasProject || selectedId === null || selectedId === undefined) {
+        if (selected === null || selected === undefined) {
           setLogState(null);
           return undefined;
         }
         var alive = true;
         var timer = null;
+        var projectPath = selected.projectPath;
+        var commandId = selected.commandId;
         setLogState(null);
         stickRef.current = true;
         async function tick() {
           try {
             var value = await rpc("project/log", {
               projectPath: projectPath,
-              commandId: selectedId,
+              commandId: commandId,
               maxBytes: LOG_MAX_BYTES
             });
             if (!alive) return;
@@ -1817,12 +1884,16 @@ window.__ModuleLoader__.load({
           alive = false;
           clearTimeout(timer);
         };
-      }, [hasProject, projectPath, selectedId]);
+      }, [selected]);
+
+      async function refreshStatus() {
+        var value = await rpc("project/status", {});
+        setRunners(value !== null && value !== undefined && Array.isArray(value.runners) ? value.runners : []);
+      }
 
       async function refreshDiagnose() {
-        if (!hasProject) return;
         try {
-          var value = await rpc("project/diagnose", { projectPath: projectPath });
+          var value = await rpc("project/diagnose", {});
           setDiagnose(value !== null && value !== undefined && Array.isArray(value.entries) ? value.entries : []);
         } catch (diagnoseError) {
           setError(diagnoseError);
@@ -1830,13 +1901,12 @@ window.__ModuleLoader__.load({
       }
 
       async function refresh() {
-        if (!hasProject || busy !== null) return;
+        if (busy !== null) return;
         setBusy("__refresh__");
         setError(null);
         try {
           await loadConfig();
-          var value = await rpc("project/status", { projectPath: projectPath });
-          setRunners(value !== null && value !== undefined && Array.isArray(value.runners) ? value.runners : []);
+          await refreshStatus();
           await refreshDiagnose();
         } catch (refreshError) {
           setError(refreshError);
@@ -1845,20 +1915,21 @@ window.__ModuleLoader__.load({
         }
       }
 
-      async function runAction(action, commandId) {
-        if (!hasProject || busy !== null) return;
+      async function runAction(action, commandId, projectPath) {
+        if (busy !== null || projectPath === undefined || projectPath === null || projectPath === "") return;
         setBusy(commandId);
         setError(null);
         try {
           var endpoint = action === "start" ? "project/start" : action === "stop" ? "project/stop" : "project/restart";
-          var value = await rpc(endpoint, { projectPath: projectPath, commandId: commandId });
-          if (value !== null && value !== undefined && Array.isArray(value.runners)) setRunners(value.runners);
-          if (action !== "stop") setSelectedId(commandId);
+          await rpc(endpoint, { projectPath: projectPath, commandId: commandId });
+          await refreshStatus();
+          if (action !== "stop") setSelected({ projectPath: projectPath, commandId: commandId });
           await refreshDiagnose();
         } catch (actionError) {
           if (isPortBlockingError(actionError)) {
             setError(null);
             setConflict({
+              projectPath: projectPath,
               commandId: commandId,
               action: action,
               kind: actionError.code,
@@ -1874,13 +1945,13 @@ window.__ModuleLoader__.load({
         }
       }
 
-      async function runStartAll() {
-        if (!hasProject || busy !== null) return;
+      async function runStartAll(projectPath) {
+        if (busy !== null || projectPath === undefined || projectPath === null || projectPath === "") return;
         setBusy("__startAll__");
         setError(null);
         try {
           var value = await rpc("project/startAll", { projectPath: projectPath });
-          if (value !== null && value !== undefined && Array.isArray(value.runners)) setRunners(value.runners);
+          await refreshStatus();
           var failed = value !== null && value !== undefined && Array.isArray(value.failed) ? value.failed : [];
           var conflictFailure = null;
           for (var failedIndex = 0; failedIndex < failed.length; failedIndex += 1) {
@@ -1895,6 +1966,7 @@ window.__ModuleLoader__.load({
           if (conflictFailure !== null) {
             setError(null);
             setConflict({
+              projectPath: projectPath,
               commandId: conflictFailure.commandId,
               action: "startAll",
               kind: conflictFailure.code,
@@ -1920,13 +1992,13 @@ window.__ModuleLoader__.load({
         }
       }
 
-      async function runStopAll() {
-        if (!hasProject || busy !== null) return;
+      async function runStopAll(projectPath) {
+        if (busy !== null || projectPath === undefined || projectPath === null || projectPath === "") return;
         setBusy("__stopAll__");
         setError(null);
         try {
-          var value = await rpc("project/stopAll", { projectPath: projectPath });
-          if (value !== null && value !== undefined && Array.isArray(value.runners)) setRunners(value.runners);
+          await rpc("project/stopAll", { projectPath: projectPath });
+          await refreshStatus();
           await refreshDiagnose();
         } catch (stopAllError) {
           setError(stopAllError);
@@ -1936,10 +2008,11 @@ window.__ModuleLoader__.load({
       }
 
       /** 行内「结束并启动」：用诊断到的外部占用者直接打开端口冲突对话框。 */
-      function openExternalConflict(entry, commandId) {
-        if (!hasProject || entry === null || entry === undefined) return;
+      function openExternalConflict(entry, commandId, projectPath) {
+        if (entry === null || entry === undefined) return;
         setError(null);
         setConflict({
+          projectPath: typeof entry.projectPath === "string" && entry.projectPath !== "" ? entry.projectPath : projectPath,
           commandId: commandId,
           action: "start",
           kind: "port-conflict",
@@ -1949,11 +2022,11 @@ window.__ModuleLoader__.load({
       }
 
       async function clearLog() {
-        if (!hasProject || selectedId === null || selectedId === undefined) return;
+        if (selected === null || selected === undefined || busy !== null) return;
         setBusy("__log_clear__");
         setError(null);
         try {
-          await rpc("project/log/clear", { projectPath: projectPath, commandId: selectedId });
+          await rpc("project/log/clear", { projectPath: selected.projectPath, commandId: selected.commandId });
           setLogState({
             text: "",
             bytes: 0,
@@ -1985,6 +2058,7 @@ window.__ModuleLoader__.load({
        */
       async function resolveConflict() {
         if (conflict === null || conflict === undefined || conflictBusy) return;
+        var projectPath = conflict.projectPath;
         setConflictBusy(true);
         setConflictError(null);
         try {
@@ -2005,7 +2079,7 @@ window.__ModuleLoader__.load({
           }
           if (conflict.action === "startAll") {
             var all = await rpc("project/startAll", { projectPath: projectPath });
-            if (all !== null && all !== undefined && Array.isArray(all.runners)) setRunners(all.runners);
+            await refreshStatus();
             var failed = all !== null && all !== undefined && Array.isArray(all.failed) ? all.failed : [];
             var nextConflict = null;
             for (var failedIndex = 0; failedIndex < failed.length; failedIndex += 1) {
@@ -2020,6 +2094,7 @@ window.__ModuleLoader__.load({
             await refreshDiagnose();
             if (nextConflict !== null) {
               setConflict({
+                projectPath: projectPath,
                 commandId: nextConflict.commandId,
                 action: "startAll",
                 kind: nextConflict.code,
@@ -2037,14 +2112,15 @@ window.__ModuleLoader__.load({
             return;
           }
           var endpoint = conflict.action === "restart" ? "project/restart" : "project/start";
-          var value = await rpc(endpoint, { projectPath: projectPath, commandId: conflict.commandId });
-          if (value !== null && value !== undefined && Array.isArray(value.runners)) setRunners(value.runners);
-          setSelectedId(conflict.commandId);
+          await rpc(endpoint, { projectPath: projectPath, commandId: conflict.commandId });
+          await refreshStatus();
+          setSelected({ projectPath: projectPath, commandId: conflict.commandId });
           await refreshDiagnose();
           setConflict(null);
         } catch (actionError) {
           if (isPortBlockingError(actionError)) {
             setConflict({
+              projectPath: conflict.projectPath,
               commandId: conflict.commandId,
               action: conflict.action,
               kind: actionError.code,
@@ -2061,18 +2137,144 @@ window.__ModuleLoader__.load({
         }
       }
 
-      var commands = hasProject ? visibleCommandsForProject(config, projectPath) : [];
-      var runnerByCommand = {};
+      // ── 派生数据：全部项目的 runner / 命令分组 ────────────────────────────
+      function compositeKey(projectPath, commandId) {
+        return normalizePath(projectPath) + "\u0000" + String(commandId);
+      }
+
+      var runnerByKey = {};
+      var runnersByCommandId = {};
       for (var runnerIndex = 0; runnerIndex < runners.length; runnerIndex += 1) {
         var runner = runners[runnerIndex];
-        if (runner !== null && runner !== undefined && typeof runner.commandId === "string") {
-          runnerByCommand[runner.commandId] = runner;
+        if (runner === null || runner === undefined || typeof runner.commandId !== "string") continue;
+        if (typeof runner.projectPath === "string" && runner.projectPath !== "") {
+          runnerByKey[compositeKey(runner.projectPath, runner.commandId)] = runner;
+        }
+        if (runnersByCommandId[runner.commandId] === undefined) runnersByCommandId[runner.commandId] = runner;
+      }
+
+      var configById = {};
+      var allCommands = commandsOf(config);
+      for (var configIndex = 0; configIndex < allCommands.length; configIndex += 1) {
+        var configCommand = allCommands[configIndex];
+        if (configCommand !== null && configCommand !== undefined && typeof configCommand.id === "string") {
+          configById[configCommand.id] = configCommand;
         }
       }
 
+      function runnerCommandOf(runner) {
+        return {
+          id: runner.commandId,
+          title: typeof runner.title === "string" && runner.title !== "" ? runner.title : String(runner.commandId),
+          command: typeof runner.command === "string" ? runner.command : "",
+          cwd: typeof runner.cwd === "string" ? runner.cwd : "",
+          scope: "project",
+          projectRoot: runner.projectPath,
+          enabled: true,
+          env: {},
+          ports: Array.isArray(runner.ports) ? runner.ports.slice() : [],
+          readyPort: runner.readyPort === undefined ? null : runner.readyPort,
+          readyTimeoutMs: runner.readyTimeoutMs,
+          dependsOn: []
+        };
+      }
+
+      function findRowRunner(command, projectPath) {
+        if (projectPath === undefined || projectPath === null || projectPath === "") return undefined;
+        var direct = runnerByKey[compositeKey(projectPath, command.id)];
+        if (direct !== undefined) return direct;
+        var candidate = runnersByCommandId[command.id];
+        if (candidate !== undefined && command.scope !== "global"
+          && commandMatchesProject(command, candidate.projectPath)) {
+          return candidate;
+        }
+        return undefined;
+      }
+
+      function sectionKeyOfRunner(runner) {
+        var command = configById[runner.commandId];
+        if (command !== undefined && command.scope === "project") {
+          var root = typeof command.projectRoot === "string" ? command.projectRoot.trim() : "";
+          if (root !== "") return normalizePath(root);
+        }
+        return normalizePath(runner.projectPath);
+      }
+
+      var sections = buildRunnerSections(config, currentProjectPath);
+      var sectionByKey = {};
+      for (var sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
+        sectionByKey[sections[sectionIndex].key] = sections[sectionIndex];
+      }
+      // 运行中但配置里没有对应项目的（例如命令被删、或全局命令跑在别的项目），也给出分组。
+      for (var extraIndex = 0; extraIndex < runners.length; extraIndex += 1) {
+        var extraRunner = runners[extraIndex];
+        if (extraRunner === null || extraRunner === undefined || typeof extraRunner.projectPath !== "string") continue;
+        var extraKey = sectionKeyOfRunner(extraRunner);
+        if (extraKey === "" || sectionByKey[extraKey] !== undefined) continue;
+        var extraSection = { key: extraKey, projectPath: extraRunner.projectPath, global: false, commands: [] };
+        sectionByKey[extraKey] = extraSection;
+        sections.push(extraSection);
+      }
+      sections.sort(function (left, right) {
+        if (left.global !== right.global) return left.global ? 1 : -1;
+        var currentKey = typeof currentProjectPath === "string" && currentProjectPath !== "" ? normalizePath(currentProjectPath) : null;
+        var leftCurrent = currentKey !== null && (left.key === currentKey || currentKey.indexOf(left.key + "\\") === 0);
+        var rightCurrent = currentKey !== null && (right.key === currentKey || currentKey.indexOf(right.key + "\\") === 0);
+        if (leftCurrent !== rightCurrent) return leftCurrent ? -1 : 1;
+        if (left.key < right.key) return -1;
+        if (left.key > right.key) return 1;
+        return 0;
+      });
+
+      function rowsOfSection(section) {
+        var rows = [];
+        var targetPath = section.global === true ? undefined : section.projectPath;
+        for (var commandIndex = 0; commandIndex < section.commands.length; commandIndex += 1) {
+          var command = section.commands[commandIndex];
+          rows.push({ command: command, projectPath: targetPath, runner: findRowRunner(command, targetPath) });
+        }
+        for (var runnerIndex2 = 0; runnerIndex2 < runners.length; runnerIndex2 += 1) {
+          var running = runners[runnerIndex2];
+          if (running === null || running === undefined) continue;
+          if (sectionKeyOfRunner(running) !== section.key) continue;
+          var covered = false;
+          for (var rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+            if (rows[rowIndex].runner === running) {
+              covered = true;
+              break;
+            }
+          }
+          if (covered) continue;
+          var configured = configById[running.commandId];
+          rows.push({
+            command: configured !== undefined ? configured : runnerCommandOf(running),
+            projectPath: running.projectPath,
+            runner: running,
+            runnerOnly: configured === undefined
+          });
+        }
+        return rows;
+      }
+
       function titleOfCommand(commandId) {
-        var command = findCommandOf(config, commandId);
-        return command !== undefined && typeof command.title === "string" ? command.title : commandId;
+        var command = configById[commandId];
+        if (command !== undefined && typeof command.title === "string") return command.title;
+        var runner = runnersByCommandId[commandId];
+        if (runner !== undefined && typeof runner.title === "string" && runner.title !== "") return runner.title;
+        return commandId;
+      }
+
+      var runningTotal = 0;
+      for (var totalIndex = 0; totalIndex < runners.length; totalIndex += 1) {
+        var totalRunner = runners[totalIndex];
+        if (totalRunner !== null && totalRunner !== undefined
+          && (totalRunner.status === "running" || totalRunner.status === "starting" || totalRunner.status === "stopping")) {
+          runningTotal += 1;
+        }
+      }
+      var projectCount = 0;
+      for (var projectIndex = 0; projectIndex < sections.length; projectIndex += 1) {
+        if (sections[projectIndex].global !== true) projectCount += 1;
       }
 
       var errorBar = error === null || error === undefined ? null : h("div", {
@@ -2088,16 +2290,19 @@ window.__ModuleLoader__.load({
         }, "关闭"),
         errorDetailText(error) !== "" ? h("span", { className: "dshRunnerErrorDetail" }, errorDetailText(error)) : null);
 
-      function renderRow(command) {
-        var current = runnerByCommand[command.id];
+      function renderRow(row) {
+        var command = row.command;
+        var projectPath = row.projectPath;
+        var current = row.runner !== undefined ? row.runner : findRowRunner(command, projectPath);
         var hasRunner = current !== null && current !== undefined;
-        var external = externalOccupancyForCommand(diagnose, command.id);
+        var external = externalOccupancyForCommand(diagnose, command.id, projectPath);
         var status = hasRunner && typeof current.status === "string"
           ? current.status
           : (external !== undefined ? "external" : "idle");
         var disabled = command.enabled === false;
         var active = status === "starting" || status === "running" || status === "stopping";
         var rowBusy = busy !== null;
+        var canAct = projectPath !== undefined && projectPath !== null && projectPath !== "";
         var declaredPorts = Array.isArray(command.ports) ? command.ports : [];
         var actualPorts = current !== null && current !== undefined && Array.isArray(current.actualPorts)
           ? current.actualPorts
@@ -2110,6 +2315,7 @@ window.__ModuleLoader__.load({
               return actualPorts.indexOf(port) === -1;
             })
           : [];
+        var rowKey = compositeKey(projectPath === undefined ? "" : projectPath, command.id);
         var meta = [];
         if (current !== null && current !== undefined && current.status === "running" && typeof current.startedAt === "number") {
           meta.push(h("span", { key: "uptime", className: "dshRunnerStatusText" }, "运行 " + formatUptime(Date.now() - current.startedAt)));
@@ -2134,13 +2340,18 @@ window.__ModuleLoader__.load({
           }
         }
         return h("div", {
-          key: command.id,
+          key: rowKey,
           className: "dshRunnerRow",
           "data-command-id": command.id,
+          "data-project-path": projectPath === undefined ? "" : projectPath,
           "data-status": status,
-          "data-selected": selectedId === command.id ? "true" : "false",
+          "data-selected": selected !== null && selected !== undefined
+            && selected.commandId === command.id
+            && normalizePath(selected.projectPath) === normalizePath(projectPath) ? "true" : "false",
           "data-disabled": disabled ? "true" : "false",
-          onClick: function () { setSelectedId(command.id); }
+          onClick: function () {
+            if (canAct) setSelected({ projectPath: projectPath, commandId: command.id });
+          }
         },
           h("span", { className: "dshRunnerDot", "data-status": status, title: runnerStatusText(status) }),
           h("div", { className: "dshRunnerRowMain" },
@@ -2174,39 +2385,91 @@ window.__ModuleLoader__.load({
               type: "button",
               className: "dshRunnerMiniBtn",
               "data-action": !hasRunner && external !== undefined ? "kill-and-start" : "start",
-              disabled: rowBusy || disabled || active,
+              disabled: rowBusy || disabled || active || !canAct,
               onClick: function (event) {
                 event.stopPropagation();
-                if (!hasRunner && external !== undefined) openExternalConflict(external, command.id);
-                else runAction("start", command.id);
+                if (!hasRunner && external !== undefined) openExternalConflict(external, command.id, projectPath);
+                else runAction("start", command.id, projectPath);
               }
             }, !hasRunner && external !== undefined ? "结束并启动" : "启动"),
             h("button", {
               type: "button",
               className: "dshRunnerMiniBtn",
               "data-action": "stop",
-              disabled: rowBusy || current === null || current === undefined || !active,
+              disabled: rowBusy || current === null || current === undefined || !active || !canAct,
               onClick: function (event) {
                 event.stopPropagation();
-                runAction("stop", command.id);
+                runAction("stop", command.id, projectPath);
               }
             }, "停止"),
             h("button", {
               type: "button",
               className: "dshRunnerMiniBtn",
               "data-action": "restart",
-              disabled: rowBusy || disabled || (!hasRunner && external !== undefined),
+              disabled: rowBusy || disabled || (!hasRunner && external !== undefined) || !canAct,
               onClick: function (event) {
                 event.stopPropagation();
-                runAction("restart", command.id);
+                runAction("restart", command.id, projectPath);
               }
             }, "重启")));
       }
 
-      var selectedCommand = selectedId === null || selectedId === undefined ? undefined : findCommandOf(config, selectedId);
-      var selectedTitle = selectedCommand !== undefined && typeof selectedCommand.title === "string"
-        ? selectedCommand.title
-        : (selectedId === null || selectedId === undefined ? "" : String(selectedId));
+      function renderSection(section) {
+        var rows = rowsOfSection(section);
+        var runningCount = 0;
+        for (var rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+          if (rows[rowIndex].runner !== undefined) runningCount += 1;
+        }
+        var sectionTitle = section.global === true
+          ? "全局命令"
+          : projectTitleOf(section.projectPath, workspaceOptions);
+        var currentKey = typeof currentProjectPath === "string" && currentProjectPath !== "" ? normalizePath(currentProjectPath) : null;
+        var isCurrent = section.global !== true && currentKey !== null
+          && (normalizePath(section.projectPath) === currentKey
+            || currentKey.indexOf(normalizePath(section.projectPath) + "\\") === 0);
+        return h("div", {
+          key: section.key,
+          className: "dshRunnerSection",
+          "data-project-path": section.global === true ? "" : section.projectPath,
+          "data-current": isCurrent ? "true" : "false"
+        },
+          h("div", { className: "dshRunnerSectionHead" },
+            h("div", { className: "dshRunnerSectionInfo" },
+              h("span", { className: "dshRunnerSectionTitle", title: section.projectPath === undefined ? "" : section.projectPath }, sectionTitle),
+              isCurrent ? h("span", { className: "dshLimobTag" }, "当前") : null,
+              h("span", { className: "dshRunnerSectionPath", title: section.projectPath === undefined ? "" : section.projectPath },
+                section.projectPath === undefined ? "未选择项目会话" : section.projectPath),
+              h("span", { className: "dshRunnerSectionCount" }, String(runningCount) + " / " + String(rows.length) + " 运行")),
+            section.global === true ? null : h("div", { className: "dshRunnerSectionActions" },
+              h("button", {
+                type: "button",
+                className: "dshRunnerMiniBtn",
+                "data-action": "start-all",
+                disabled: busy !== null,
+                onClick: function () { runStartAll(section.projectPath); }
+              }, "本组启动"),
+              h("button", {
+                type: "button",
+                className: "dshRunnerMiniBtn",
+                "data-action": "stop-all",
+                disabled: busy !== null,
+                onClick: function () { runStopAll(section.projectPath); }
+              }, "本组停止"))),
+          rows.length === 0
+            ? h("div", { className: "dshRunnerSectionEmpty" },
+                section.global === true ? "进入项目会话后可启动全局命令。" : "该项目暂无命令。")
+            : rows.map(renderRow));
+      }
+
+      var selectedCommand = selected === null || selected === undefined
+        ? undefined
+        : (configById[selected.commandId] !== undefined
+          ? configById[selected.commandId]
+          : (runnersByCommandId[selected.commandId] !== undefined ? runnerCommandOf(runnersByCommandId[selected.commandId]) : undefined));
+      var selectedTitle = selected === null || selected === undefined
+        ? ""
+        : (selectedCommand !== undefined && typeof selectedCommand.title === "string" ? selectedCommand.title : String(selected.commandId));
+      var selectedProjectPath = selected !== null && selected !== undefined && typeof selected.projectPath === "string" ? selected.projectPath : "";
       var logText = logState !== null && logState !== undefined && typeof logState.text === "string" ? stripAnsi(logState.text) : "";
       var logBytes = logState !== null && logState !== undefined && typeof logState.bytes === "number" ? logState.bytes : 0;
       var logTruncated = logState !== null && logState !== undefined && logState.truncated === true;
@@ -2214,13 +2477,14 @@ window.__ModuleLoader__.load({
 
       var logPane = h("div", { className: "dshRunnerLogPane" },
         h("div", { className: "dshRunnerLogHead" },
-          h("span", { className: "dshRunnerLogTitle", title: selectedTitle },
+          h("span", { className: "dshRunnerLogTitle", title: selectedProjectPath === "" ? selectedTitle : selectedProjectPath },
             selectedTitle === "" ? "日志" : selectedTitle + " · 日志"),
+          selectedProjectPath === "" ? null : h("span", { className: "dshRunnerLogMeta", title: selectedProjectPath }, selectedProjectPath),
           h("span", { className: "dshRunnerLogMeta" }, logMeta),
           h("button", {
             type: "button",
             className: "dshRunnerMiniBtn",
-            disabled: selectedId === null || selectedId === undefined || busy !== null,
+            disabled: selected === null || selected === undefined || busy !== null,
             onClick: clearLog
           }, "清空日志"),
           h("button", {
@@ -2234,10 +2498,9 @@ window.__ModuleLoader__.load({
           "data-dsh-runner-log": "1",
           ref: logRef,
           onScroll: handleLogScroll
-        }, selectedId === null || selectedId === undefined
+        }, selected === null || selected === undefined
           ? "点左侧命令行查看运行日志。"
           : (logText === "" ? "（暂无日志）" : logText)));
-
 
       function renderConflictEntry(item, index) {
         var occupant = item !== null && item !== undefined && item.occupant !== null && item.occupant !== undefined
@@ -2274,6 +2537,8 @@ window.__ModuleLoader__.load({
       },
         h("div", { className: "dshRunnerDialog", "data-dsh-runner-conflict": "1" },
           h("div", { className: "dshRunnerDialogHead" }, "端口被占用"),
+          h("div", { className: "dshRunnerDialogSub" },
+            "项目：" + String(conflict.projectPath === undefined ? "未知" : conflict.projectPath)),
           h("div", { className: "dshRunnerDialogSub" },
             conflict.kind === "port-mismatch"
               ? "「" + titleOfCommand(conflict.commandId) + "」未能绑定声明端口，本次启动已终止"
@@ -2317,40 +2582,18 @@ window.__ModuleLoader__.load({
               onClick: function () { setEditorOpen(false); }
             }, "关闭")),
           h(ConfigEditor, {
-            currentProjectPath: projectPath,
-            workspaces: workspaceOptionsFrom(props !== undefined ? props.useWorkspaces : undefined)
+            currentProjectPath: currentProjectPath,
+            workspaces: workspaceOptions
           })));
-
-      if (!hasProject) {
-        return h("div", { className: "dshRunnerPage", "data-dsh-runner-page": "1" },
-          h("div", { className: "dshLimobPageHead" },
-            h("div", null,
-              h("div", { className: "dshLimobPageTitle" }, "运行"),
-              h("div", { className: "dshLimobPageSub" }, "项目运行面板：启停命令、查看日志、诊断端口")),
-            h("span", { className: "dshLimobPageVersion" }, "v" + PLUGIN_VERSION)),
-          h("div", { className: "dshRunnerEmpty" }, "请先进入一个项目会话"),
-          errorBar,
-          editorModal);
-      }
 
       return h("div", { className: "dshRunnerPage", "data-dsh-runner-page": "1" },
         h("div", { className: "dshRunnerHead" },
           h("div", { className: "dshRunnerHeadMain" },
             h("span", { className: "dshRunnerTitle" }, "运行"),
-            h("span", { className: "dshRunnerProject", title: projectPath }, projectPath)),
+            h("span", { className: "dshRunnerProject" }, "全部项目"),
+            h("span", { className: "dshRunnerGlobalSummary" },
+              String(projectCount) + " 个项目 · " + String(runningTotal) + " 个运行中")),
           h("div", { className: "dshRunnerToolbar" },
-            h("button", {
-              type: "button",
-              className: "dshLimobCfgBtn",
-              disabled: busy !== null,
-              onClick: runStartAll
-            }, "启动全部"),
-            h("button", {
-              type: "button",
-              className: "dshLimobCfgBtn",
-              disabled: busy !== null,
-              onClick: runStopAll
-            }, "停止全部"),
             h("button", {
               type: "button",
               className: "dshLimobCfgBtn",
@@ -2364,11 +2607,11 @@ window.__ModuleLoader__.load({
             }, "管理命令"))),
         errorBar,
         h("div", { className: "dshRunnerBody" },
-          commands.length === 0
-            ? h("div", { className: "dshRunnerList" },
+          sections.length === 0
+            ? h("div", { className: "dshRunnerList", "data-dsh-runner-all": "1" },
                 h("div", { className: "dshRunnerEmpty" },
-                  "当前项目还没有命令。点右上角「管理命令」新增，或在「设置 → dsh-runner」里编辑。"))
-            : h("div", { className: "dshRunnerList" }, commands.map(renderRow)),
+                  "还没有配置任何命令。点右上角「管理命令」新增，或在「设置 → dsh-runner」里编辑。"))
+            : h("div", { className: "dshRunnerList", "data-dsh-runner-all": "1" }, sections.map(renderSection)),
           logPane),
         conflictDialog,
         editorModal);
@@ -2668,6 +2911,7 @@ window.__ModuleLoader__.load({
       visibleCommandsForProject: visibleCommandsForProject,
       runnerStatusText: runnerStatusText,
       externalOccupancyForCommand: externalOccupancyForCommand,
+      buildRunnerSections: buildRunnerSections,
       occupantSummary: occupantSummary,
       formatProcessChain: formatProcessChain,
       formatProcessChildren: formatProcessChildren

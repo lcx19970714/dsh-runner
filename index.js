@@ -182,6 +182,14 @@ function requireString(value, field) {
   return value.trim();
 }
 
+function optionalProjectPath(payload, endpoint) {
+  const raw = payload === null || payload === undefined ? undefined : payload.projectPath;
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "string") throw new RpcError("bad-request", endpoint + " 的 projectPath 必须是字符串", {});
+  const trimmed = raw.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
 function requireProjectPath(payload) {
   return requireString(payload.projectPath, "projectPath");
 }
@@ -279,7 +287,8 @@ async function dispatch(runner, endpoint, payload, logger) {
   }
 
   if (endpoint === "project/status") {
-    const projectPath = requireProjectPath(data);
+    // projectPath 可省略：省略时返回所有项目的 runner（左侧运行面板的全局视图）。
+    const projectPath = optionalProjectPath(data, "project/status");
     await runner.refresh();
     return { runners: runner.list(projectPath) };
   }
@@ -323,7 +332,8 @@ async function dispatch(runner, endpoint, payload, logger) {
     return { stopped: stopped, runners: runner.list(projectPath) };
   }
   if (endpoint === "project/diagnose") {
-    const projectPath = requireProjectPath(data);
+    // projectPath 可省略：省略时诊断所有 project 作用域命令（按各自 projectRoot 标注）。
+    const projectPath = optionalProjectPath(data, "project/diagnose");
     const loaded = await loadHostConfig(logger);
     const entries = await runner.diagnose(loaded.config.commands, projectPath);
     return { entries: entries };

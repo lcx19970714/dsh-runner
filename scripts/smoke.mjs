@@ -1,8 +1,8 @@
-// dsh-runner 0.15.0 的离线冒烟测试（CI 与本地都用它）。
+// dsh-runner 0.16.0 的离线冒烟测试（CI 与本地都用它）。
 //
 // 覆盖（SPEC 第 5 节 smoke 要求）：
 // 1. 用假的 window.__ModuleLoader__ / react / localStorage 执行 client.js，确认模块 id 与注入；
-// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.15.0）；
+// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.16.0）；
 // 3. slot 注册集合恰为 6 个：conversation.composer.dock / main / sidebar.panellist /
 //    settings.section / plugins.detail.badge / plugins.detail.section；
 // 4. __test 纯函数断言：stripAnsi / formatUptime / formatBytes / commandMatchesProject /
@@ -60,6 +60,7 @@ assert.notEqual(__test, undefined, "client.js 必须导出 __test 纯函数入�
 assert.deepEqual(
   Object.keys(__test).sort(),
   [
+    "buildRunnerSections",
     "commandMatchesProject",
     "externalOccupancyForCommand",
     "formatBytes",
@@ -78,7 +79,7 @@ assert.deepEqual(
 const versionMatch = /var PLUGIN_VERSION = "([^"]+)";/.exec(source);
 assert.ok(versionMatch !== null, "client.js 必须有 PLUGIN_VERSION 常量");
 assert.equal(versionMatch[1], manifest.version, "PLUGIN_VERSION 必须与 package.json version 一致");
-assert.equal(manifest.version, "0.15.0", "目标版本是 0.15.0");
+assert.equal(manifest.version, "0.16.0", "目标版本是 0.16.0");
 
 // ---- 4. 纯函数断言 ----
 assert.equal(__test.stripAnsi("\u001b[31mred\u001b[0m"), "red");
@@ -164,6 +165,32 @@ assert.equal(__test.externalOccupancyForCommand(diagnoseFixture, "idle"), undefi
 const externalEntry = __test.externalOccupancyForCommand(diagnoseFixture, "external");
 assert.equal(externalEntry.port, 6103);
 assert.equal(__test.externalOccupancyForCommand(null, "external"), undefined);
+assert.equal(
+  __test.externalOccupancyForCommand([{ commandId: "x", listening: true, projectPath: "H:\\A", occupant: { pid: 1 } }], "x", "H:\\B"),
+  undefined,
+  "诊断条目必须按项目匹配，不能串项目"
+);
+assert.equal(
+  __test.externalOccupancyForCommand([{ commandId: "x", listening: true, projectPath: "H:\\A", occupant: { pid: 1 } }], "x", "H:\\A").port,
+  undefined,
+  "缺少 port 的条目仍返回（调用方只关心占用者）"
+);
+
+// 全局运行面板：按项目分组、当前项目优先、全局命令跟随当前项目
+const sectionConfig = {
+  commands: [
+    { id: "b-cmd", scope: "project", projectRoot: "H:\\B" },
+    { id: "a-cmd", scope: "project", projectRoot: "H:\\A" },
+    { id: "g-cmd", scope: "global" }
+  ]
+};
+const groupedSections = __test.buildRunnerSections(sectionConfig, "H:\\A");
+assert.deepEqual(groupedSections.map((section) => section.key), ["h:\\a", "h:\\b"]);
+assert.deepEqual(groupedSections[0].commands.map((command) => command.id), ["a-cmd", "g-cmd"]);
+assert.deepEqual(groupedSections[1].commands.map((command) => command.id), ["b-cmd"]);
+const groupedNoCurrent = __test.buildRunnerSections(sectionConfig, undefined);
+assert.deepEqual(groupedNoCurrent.map((section) => section.key), ["h:\\a", "h:\\b", "__global__"]);
+assert.deepEqual(groupedNoCurrent[2].commands.map((command) => command.id), ["g-cmd"]);
 assert.equal(__test.runnerStatusText("failed"), "启动失败");
 assert.equal(__test.runnerStatusText("idle"), "未运行");
 
@@ -241,10 +268,11 @@ assert.equal(iconTree.props.width, 20);
 assert.equal(iconTree.props.height, 20);
 assert.equal(sidebar.component({}).props.width, 16, "默认图标尺寸 16");
 
-// 6.2 RunnerPage：无会话 → 提示"请先进入一个项目会话"
+// 6.2 RunnerPage：无会话也展示全局运行面板（全部项目）
 const page = mainEntry.component({});
 assert.equal(page.props["data-dsh-runner-page"], "1", "RunnerPage 根节点必须有 data-dsh-runner-page");
-assert.ok(textOf(page).includes("请先进入一个项目会话"), "无项目时应提示先进入项目会话");
+assert.ok(textOf(page).includes("全部项目"), "全局运行面板应显示「全部项目」");
+assert.ok(textOf(page).includes("还没有配置任何命令"), "无配置时应提示新增命令");
 
 // 6.3 composer 按钮：紧凑「▶ 运行」
 const composer = bySlot("conversation.composer.dock").component;
