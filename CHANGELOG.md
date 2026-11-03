@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.0
+
+### Added（分组折叠 + 记忆）
+
+- 左侧「运行」的项目分组可**折叠 / 展开**（标题前 `▾ / ▸`），暂时不用的工作区可以收起。
+- **折叠状态持久化在 Host**：`~/.dsh/dsh-runner/ui-state.json`，跨会话、Host 重启、换浏览器都保留；
+  不依赖 localStorage。
+- 折叠后分组标题仍显示 `运行数 / 总数`，并额外提示「外部 N / 异常 N」，避免因为折叠漏看问题。
+- 新增 RPC：`ui/get`、`ui/update`（`collapsedProjects` 按规范化路径去重；`collapsedGlobal` 记忆全局命令分组）。
+- UI 状态文件缺失或损坏时自动回到「全部展开」，不影响 commands.json、进程与日志。
+
 ## 0.16.1
 
 - 配置里已删除的历史 runner 仍会显示（便于停止），但其「启动 / 重启」按钮禁用，避免按旧 commandId 再次启动导致报错。

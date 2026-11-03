@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.16.1";
+    var PLUGIN_VERSION = "0.17.0";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -184,6 +184,9 @@ window.__ModuleLoader__.load({
       ".dshRunnerSectionPath{font-size:10px;line-height:15px;opacity:.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1 1 auto;font-family:ui-monospace,Consolas,'Courier New',monospace}",
       ".dshRunnerSectionCount{font-size:10px;line-height:15px;opacity:.6;white-space:nowrap}",
       ".dshRunnerSectionActions{display:flex;gap:4px;flex:none}",
+      ".dshRunnerSectionToggle{flex:none;width:16px;height:16px;padding:0;border:none;background:none;color:inherit;opacity:.65;font-size:10px;line-height:16px;cursor:pointer}",
+      ".dshRunnerSectionToggle:hover{opacity:1}",
+      ".dshRunnerSectionIssue{font-size:10px;line-height:15px;color:#f59e0b;white-space:nowrap}",
       ".dshRunnerSectionEmpty{font-size:11px;line-height:16px;opacity:.55;padding:6px 8px}",
       ".dshRunnerGlobalSummary{font-size:10px;line-height:15px;opacity:.6;white-space:nowrap}",
       ".dshRunnerRow{display:flex;align-items:flex-start;gap:7px;padding:8px 10px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.22));min-width:0;cursor:pointer}",
@@ -678,6 +681,32 @@ window.__ModuleLoader__.load({
         return entry;
       }
       return undefined;
+    }
+
+    /** 项目分组 key 是否在折叠列表里（路径统一规范）。 */
+    function isProjectCollapsed(collapsedProjects, projectPath) {
+      if (!Array.isArray(collapsedProjects)) return false;
+      var key = normalizePath(projectPath);
+      if (key === "") return false;
+      for (var i = 0; i < collapsedProjects.length; i += 1) {
+        if (normalizePath(collapsedProjects[i]) === key) return true;
+      }
+      return false;
+    }
+
+    /** 切换某项目分组的折叠状态，返回新的折叠列表（纯函数，持久化用）。 */
+    function toggleCollapsedProject(collapsedProjects, projectPath) {
+      var key = normalizePath(projectPath);
+      var list = Array.isArray(collapsedProjects) ? collapsedProjects.slice() : [];
+      if (key === "") return list;
+      for (var i = 0; i < list.length; i += 1) {
+        if (normalizePath(list[i]) === key) {
+          list.splice(i, 1);
+          return list;
+        }
+      }
+      list.push(key);
+      return list;
     }
 
     /**
@@ -1781,6 +1810,15 @@ window.__ModuleLoader__.load({
       var copiedPair = react.useState(false);
       var copied = copiedPair[0];
       var setCopied = copiedPair[1];
+      var uiStatePair = react.useState({ collapsedProjects: [], collapsedGlobal: false });
+      var uiState = uiStatePair[0];
+      var setUiState = uiStatePair[1];
+      var uiStateRef = react.useRef(uiState);
+      var uiSeqRef = react.useRef(0);
+      function applyUiState(next) {
+        uiStateRef.current = next;
+        setUiState(next);
+      }
       var logRef = react.useRef(null);
       var stickRef = react.useRef(true);
 
@@ -1792,11 +1830,22 @@ window.__ModuleLoader__.load({
         pre.scrollTop = pre.scrollHeight;
       }, [logState]);
 
-      // 读配置；面板是全局视图，不依赖当前会话项目。
+      // 读配置 + 面板 UI 偏好（折叠状态由 Host 持久化，跨会话/重启保留）。
       react.useEffect(function () {
         var alive = true;
         loadConfig().catch(function (loadError) {
           if (alive) setError(loadError);
+        });
+        rpc("ui/get", {}).then(function (value) {
+          if (!alive) return;
+          var state = value !== null && value !== undefined ? value.uiState : undefined;
+          if (state === null || state === undefined) return;
+          applyUiState({
+            collapsedProjects: Array.isArray(state.collapsedProjects) ? state.collapsedProjects : [],
+            collapsedGlobal: state.collapsedGlobal === true
+          });
+        }, function (uiError) {
+          if (alive) setError(uiError);
         });
         return function () {
           alive = false;
@@ -1885,6 +1934,44 @@ window.__ModuleLoader__.load({
           clearTimeout(timer);
         };
       }, [selected]);
+
+      async function toggleSection(section) {
+        var seq = uiSeqRef.current + 1;
+        uiSeqRef.current = seq;
+        var previous = uiStateRef.current;
+        var next;
+        if (section.global === true) {
+          next = {
+            collapsedProjects: Array.isArray(previous.collapsedProjects) ? previous.collapsedProjects.slice() : [],
+            collapsedGlobal: previous.collapsedGlobal !== true
+          };
+        } else {
+          next = {
+            collapsedProjects: toggleCollapsedProject(previous.collapsedProjects, section.projectPath),
+            collapsedGlobal: previous.collapsedGlobal === true
+          };
+        }
+        // 连续快速点击不同分组时：同步更新 ref，后一次请求会把前一次的折叠一起带上；
+        // 只用「最新一次」的响应覆盖本地状态，避免慢响应回滚新状态。
+        applyUiState(next);
+        try {
+          var value = await rpc("ui/update", {
+            collapsedProjects: next.collapsedProjects,
+            collapsedGlobal: next.collapsedGlobal
+          });
+          if (uiSeqRef.current !== seq) return;
+          var saved = value !== null && value !== undefined ? value.uiState : undefined;
+          if (saved !== null && saved !== undefined) {
+            applyUiState({
+              collapsedProjects: Array.isArray(saved.collapsedProjects) ? saved.collapsedProjects : next.collapsedProjects,
+              collapsedGlobal: saved.collapsedGlobal === true
+            });
+          }
+        } catch (uiError) {
+          if (uiSeqRef.current === seq) applyUiState(previous);
+          setError(uiError);
+        }
+      }
 
       async function refreshStatus() {
         var value = await rpc("project/status", {});
@@ -2419,9 +2506,20 @@ window.__ModuleLoader__.load({
       function renderSection(section) {
         var rows = rowsOfSection(section);
         var runningCount = 0;
+        var failedCount = 0;
+        var externalCount = 0;
         for (var rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
-          if (rows[rowIndex].runner !== undefined) runningCount += 1;
+          var rowItem = rows[rowIndex];
+          if (rowItem.runner !== undefined) {
+            runningCount += 1;
+            if (rowItem.runner.status === "failed" || rowItem.runner.status === "exited") failedCount += 1;
+          } else if (externalOccupancyForCommand(diagnose, rowItem.command.id, rowItem.projectPath) !== undefined) {
+            externalCount += 1;
+          }
         }
+        var collapsed = section.global === true
+          ? uiState.collapsedGlobal === true
+          : isProjectCollapsed(uiState.collapsedProjects, section.projectPath);
         var sectionTitle = section.global === true
           ? "全局命令"
           : projectTitleOf(section.projectPath, workspaceOptions);
@@ -2433,15 +2531,26 @@ window.__ModuleLoader__.load({
           key: section.key,
           className: "dshRunnerSection",
           "data-project-path": section.global === true ? "" : section.projectPath,
-          "data-current": isCurrent ? "true" : "false"
+          "data-current": isCurrent ? "true" : "false",
+          "data-collapsed": collapsed ? "true" : "false"
         },
           h("div", { className: "dshRunnerSectionHead" },
+            h("button", {
+              type: "button",
+              className: "dshRunnerSectionToggle",
+              "data-action": "toggle-section",
+              "aria-expanded": collapsed ? "false" : "true",
+              title: collapsed ? "展开该工作区" : "折叠该工作区",
+              onClick: function () { toggleSection(section); }
+            }, collapsed ? "▸" : "▾"),
             h("div", { className: "dshRunnerSectionInfo" },
               h("span", { className: "dshRunnerSectionTitle", title: section.projectPath === undefined ? "" : section.projectPath }, sectionTitle),
               isCurrent ? h("span", { className: "dshLimobTag" }, "当前") : null,
               h("span", { className: "dshRunnerSectionPath", title: section.projectPath === undefined ? "" : section.projectPath },
                 section.projectPath === undefined ? "未选择项目会话" : section.projectPath),
-              h("span", { className: "dshRunnerSectionCount" }, String(runningCount) + " / " + String(rows.length) + " 运行")),
+              h("span", { className: "dshRunnerSectionCount" }, String(runningCount) + " / " + String(rows.length) + " 运行"),
+              externalCount > 0 ? h("span", { className: "dshRunnerSectionIssue" }, "外部 " + String(externalCount)) : null,
+              failedCount > 0 ? h("span", { className: "dshRunnerSectionIssue" }, "异常 " + String(failedCount)) : null),
             section.global === true ? null : h("div", { className: "dshRunnerSectionActions" },
               h("button", {
                 type: "button",
@@ -2457,10 +2566,12 @@ window.__ModuleLoader__.load({
                 disabled: busy !== null,
                 onClick: function () { runStopAll(section.projectPath); }
               }, "本组停止"))),
-          rows.length === 0
-            ? h("div", { className: "dshRunnerSectionEmpty" },
-                section.global === true ? "进入项目会话后可启动全局命令。" : "该项目暂无命令。")
-            : rows.map(renderRow));
+          collapsed
+            ? null
+            : (rows.length === 0
+              ? h("div", { className: "dshRunnerSectionEmpty" },
+                  section.global === true ? "进入项目会话后可启动全局命令。" : "该项目暂无命令。")
+              : rows.map(renderRow)));
       }
 
       var selectedCommand = selected === null || selected === undefined
@@ -2914,6 +3025,8 @@ window.__ModuleLoader__.load({
       runnerStatusText: runnerStatusText,
       externalOccupancyForCommand: externalOccupancyForCommand,
       buildRunnerSections: buildRunnerSections,
+      isProjectCollapsed: isProjectCollapsed,
+      toggleCollapsedProject: toggleCollapsedProject,
       occupantSummary: occupantSummary,
       formatProcessChain: formatProcessChain,
       formatProcessChildren: formatProcessChildren

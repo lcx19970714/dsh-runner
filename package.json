@@ -1,6 +1,6 @@
 {
   "name": "dsh-runner",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "private": false,
   "description": "DSH 插件 dsh-runner：左侧「运行」面板按项目启停服务（状态/端口/日志/重启/依赖），输入框下方保留运行快捷菜单，并提供 dsh_runner_config / dsh_runner_run AI 工具。",
   "type": "module",
@@ -15,13 +15,14 @@
     "client.js",
     "host-config.js",
     "host-runner.js",
+    "host-ui-state.js",
     "cordis.patch.yml",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
-    "harness:check": "node --check index.js && node --check client.js && node --check host-config.js && node --check host-runner.js && node scripts/host-smoke.mjs && node scripts/runner-smoke.mjs && node scripts/smoke.mjs"
+    "harness:check": "node --check index.js && node --check client.js && node --check host-config.js && node --check host-runner.js && node --check host-ui-state.js && node scripts/host-smoke.mjs && node scripts/runner-smoke.mjs && node scripts/smoke.mjs"
   },
   "keywords": [
     "dsh",

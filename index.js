@@ -25,6 +25,7 @@ import {
   updateCommand
 } from "./host-config.js";
 import { ProjectRunnerService, RunnerError, commandMatchesProject } from "./host-runner.js";
+import { loadUiState, saveUiState } from "./host-ui-state.js";
 
 export const name = "dsh-runner";
 // tools：注册 AI Tool；connection 在 apply 里按需注入（浏览器 RPC 需要）。
@@ -32,6 +33,8 @@ export const inject = ["tools"];
 
 /** 配置文件固定位置：无环境变量覆盖、无旧路径迁移。 */
 export const CONFIG_PATH = path.join(os.homedir(), ".dsh", "dsh-runner", "commands.json");
+/** 面板 UI 偏好（项目分组的折叠状态）固定与 commands.json 同目录。 */
+export const UI_STATE_PATH = path.join(path.dirname(CONFIG_PATH), "ui-state.json");
 
 const RPC_CHANNEL = "/api";
 const RPC_NAMESPACE = "dsh-runner";
@@ -42,6 +45,8 @@ const RPC_ENDPOINTS = [
   "config/delete",
   "config/reorder",
   "config/ui",
+  "ui/get",
+  "ui/update",
   "project/status",
   "project/start",
   "project/stop",
@@ -286,6 +291,30 @@ async function dispatch(runner, endpoint, payload, logger) {
     return { config: saved };
   }
 
+  if (endpoint === "ui/get") {
+    return { uiState: await loadUiState(UI_STATE_PATH) };
+  }
+  if (endpoint === "ui/update") {
+    const current = await loadUiState(UI_STATE_PATH);
+    const next = {
+      version: current.version,
+      collapsedProjects: current.collapsedProjects.slice(),
+      collapsedGlobal: current.collapsedGlobal
+    };
+    if (data.collapsedProjects !== undefined) {
+      if (!Array.isArray(data.collapsedProjects) || data.collapsedProjects.some((item) => typeof item !== "string")) {
+        throw new RpcError("bad-request", "ui/update 的 collapsedProjects 必须是字符串数组", {});
+      }
+      next.collapsedProjects = data.collapsedProjects;
+    }
+    if (data.collapsedGlobal !== undefined) {
+      if (typeof data.collapsedGlobal !== "boolean") {
+        throw new RpcError("bad-request", "ui/update 的 collapsedGlobal 必须是布尔值", {});
+      }
+      next.collapsedGlobal = data.collapsedGlobal;
+    }
+    return { uiState: await saveUiState(UI_STATE_PATH, next) };
+  }
   if (endpoint === "project/status") {
     // projectPath 可省略：省略时返回所有项目的 runner（左侧运行面板的全局视图）。
     const projectPath = optionalProjectPath(data, "project/status");

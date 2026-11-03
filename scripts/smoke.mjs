@@ -1,8 +1,8 @@
-// dsh-runner 0.16.1 的离线冒烟测试（CI 与本地都用它）。
+// dsh-runner 0.17.0 的离线冒烟测试（CI 与本地都用它）。
 //
 // 覆盖（SPEC 第 5 节 smoke 要求）：
 // 1. 用假的 window.__ModuleLoader__ / react / localStorage 执行 client.js，确认模块 id 与注入；
-// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.16.1）；
+// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.17.0）；
 // 3. slot 注册集合恰为 6 个：conversation.composer.dock / main / sidebar.panellist /
 //    settings.section / plugins.detail.badge / plugins.detail.section；
 // 4. __test 纯函数断言：stripAnsi / formatUptime / formatBytes / commandMatchesProject /
@@ -67,9 +67,11 @@ assert.deepEqual(
     "formatProcessChain",
     "formatProcessChildren",
     "formatUptime",
+    "isProjectCollapsed",
     "occupantSummary",
     "runnerStatusText",
     "stripAnsi",
+    "toggleCollapsedProject",
     "visibleCommandsForProject"
   ],
   "__test 只应包含契约要求的纯函数"
@@ -79,7 +81,7 @@ assert.deepEqual(
 const versionMatch = /var PLUGIN_VERSION = "([^"]+)";/.exec(source);
 assert.ok(versionMatch !== null, "client.js 必须有 PLUGIN_VERSION 常量");
 assert.equal(versionMatch[1], manifest.version, "PLUGIN_VERSION 必须与 package.json version 一致");
-assert.equal(manifest.version, "0.16.1", "目标版本是 0.16.1");
+assert.equal(manifest.version, "0.17.0", "目标版本是 0.17.0");
 
 // ---- 4. 纯函数断言 ----
 assert.equal(__test.stripAnsi("\u001b[31mred\u001b[0m"), "red");
@@ -191,6 +193,15 @@ assert.deepEqual(groupedSections[1].commands.map((command) => command.id), ["b-c
 const groupedNoCurrent = __test.buildRunnerSections(sectionConfig, undefined);
 assert.deepEqual(groupedNoCurrent.map((section) => section.key), ["h:\\a", "h:\\b", "__global__"]);
 assert.deepEqual(groupedNoCurrent[2].commands.map((command) => command.id), ["g-cmd"]);
+
+// 折叠状态：规范化路径比较 + 纯函数切换
+assert.equal(__test.isProjectCollapsed(["h:\\a"], "H:\\A"), true);
+assert.equal(__test.isProjectCollapsed(["h:\\a"], "H:\\B"), false);
+assert.equal(__test.isProjectCollapsed(undefined, "H:\\A"), false);
+assert.deepEqual(__test.toggleCollapsedProject([], "H:\\A"), ["h:\\a"]);
+assert.deepEqual(__test.toggleCollapsedProject(["h:\\a"], "H:\\A"), []);
+assert.deepEqual(__test.toggleCollapsedProject(["h:\\a"], "H:\\B"), ["h:\\a", "h:\\b"]);
+assert.deepEqual(__test.toggleCollapsedProject(["h:\\a"], ""), ["h:\\a"]);
 assert.equal(__test.runnerStatusText("failed"), "启动失败");
 assert.equal(__test.runnerStatusText("idle"), "未运行");
 

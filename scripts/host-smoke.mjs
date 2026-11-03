@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
+import { defaultUiState, loadUiState, normalizeUiState, saveUiState } from "../host-ui-state.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import {
   CONFIG_VERSION,
@@ -145,6 +146,18 @@ try {
   assert.deepEqual(normalizeConfig(null), defaultConfig());
   assert.deepEqual(normalizeConfig("bad"), defaultConfig());
   assert.deepEqual(normalizeConfig({ commands: "bad" }).commands, []);
+
+  // 面板 UI 偏好（折叠状态）：默认值、路径规范化、原子读写、损坏文件重置
+  const uiPath = path.join(dir, "ui-state.json");
+  assert.deepEqual(await loadUiState(uiPath), defaultUiState(), "UI 状态文件不存在时应返回默认值");
+  const savedUi = await saveUiState(uiPath, { collapsedProjects: ["H:\\A", "h:/a/", "H:\\B"], collapsedGlobal: true });
+  assert.deepEqual(savedUi.collapsedProjects, ["h:\\a", "h:\\b"], "折叠项目应规范化并去重");
+  assert.equal(savedUi.collapsedGlobal, true);
+  assert.deepEqual(await loadUiState(uiPath), savedUi, "UI 状态应可往返读取");
+  await writeFile(uiPath, "{broken", "utf8");
+  assert.deepEqual(await loadUiState(uiPath), defaultUiState(), "损坏的 UI 状态应回到默认值");
+  assert.deepEqual(normalizeUiState({ collapsedProjects: "x", collapsedGlobal: "yes" }), defaultUiState());
+  assert.deepEqual(normalizeUiState(null), defaultUiState());
 
   // 依赖环：环内命令与依赖它们的命令级联丢弃，剩下的合法
   const graph = normalizeConfig({
