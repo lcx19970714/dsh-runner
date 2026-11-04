@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.17.0";
+    var PLUGIN_VERSION = "0.17.1";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -615,6 +615,41 @@ window.__ModuleLoader__.load({
       var value = await rpc(endpoint, payload);
       if (value !== null && value !== undefined && value.config !== undefined) setConfigState(value.config);
       return value;
+    }
+
+    // 面板折叠偏好的模块级缓存：apply() 预取，页面切换时直接用缓存渲染，
+    // 避免「先按默认全展开渲染一帧、再被 ui/get 的异步结果折叠」的闪烁。
+    var uiStateCache = null;
+    var uiStateLoadPromise = null;
+
+    function normalizeUiSnapshot(state) {
+      return {
+        collapsedProjects: state !== null && state !== undefined && Array.isArray(state.collapsedProjects) ? state.collapsedProjects : [],
+        collapsedGlobal: state !== null && state !== undefined && state.collapsedGlobal === true
+      };
+    }
+
+    function storeUiState(snapshot) {
+      uiStateCache = normalizeUiSnapshot(snapshot);
+      return uiStateCache;
+    }
+
+    function prefetchUiState() {
+      if (uiStateCache !== null) return Promise.resolve(uiStateCache);
+      if (uiStateLoadPromise !== null) return uiStateLoadPromise;
+      uiStateLoadPromise = rpc("ui/get", {}).then(function (value) {
+        return storeUiState(value !== null && value !== undefined ? value.uiState : undefined);
+      }, function (error) {
+        uiStateLoadPromise = null;
+        throw error;
+      });
+      return uiStateLoadPromise;
+    }
+
+    function refreshUiState() {
+      return rpc("ui/get", {}).then(function (value) {
+        return storeUiState(value !== null && value !== undefined ? value.uiState : undefined);
+      });
     }
 
     function commandsOf(config) {
@@ -1810,14 +1845,21 @@ window.__ModuleLoader__.load({
       var copiedPair = react.useState(false);
       var copied = copiedPair[0];
       var setCopied = copiedPair[1];
-      var uiStatePair = react.useState({ collapsedProjects: [], collapsedGlobal: false });
+      var uiStatePair = react.useState(uiStateCache);
       var uiState = uiStatePair[0];
       var setUiState = uiStatePair[1];
-      var uiStateRef = react.useRef(uiState);
+      var uiLoadedPair = react.useState(uiStateCache !== null);
+      var uiLoaded = uiLoadedPair[0];
+      var setUiLoaded = uiLoadedPair[1];
+      var configReadyPair = react.useState(config !== null);
+      var configReady = configReadyPair[0];
+      var setConfigReady = configReadyPair[1];
+      var uiStateRef = react.useRef(uiStateCache !== null ? uiStateCache : { collapsedProjects: [], collapsedGlobal: false });
       var uiSeqRef = react.useRef(0);
       function applyUiState(next) {
-        uiStateRef.current = next;
-        setUiState(next);
+        var snapshot = storeUiState(next);
+        uiStateRef.current = snapshot;
+        setUiState(snapshot);
       }
       var logRef = react.useRef(null);
       var stickRef = react.useRef(true);
@@ -1833,20 +1875,34 @@ window.__ModuleLoader__.load({
       // 读配置 + 面板 UI 偏好（折叠状态由 Host 持久化，跨会话/重启保留）。
       react.useEffect(function () {
         var alive = true;
-        loadConfig().catch(function (loadError) {
-          if (alive) setError(loadError);
+        loadConfig().then(function () {
+          if (alive) setConfigReady(true);
+        }, function (loadError) {
+          if (alive) {
+            setConfigReady(true);
+            setError(loadError);
+          }
         });
-        rpc("ui/get", {}).then(function (value) {
-          if (!alive) return;
-          var state = value !== null && value !== undefined ? value.uiState : undefined;
-          if (state === null || state === undefined) return;
-          applyUiState({
-            collapsedProjects: Array.isArray(state.collapsedProjects) ? state.collapsedProjects : [],
-            collapsedGlobal: state.collapsedGlobal === true
+        if (uiStateCache !== null) {
+          // 已有缓存：首帧就按记忆状态渲染；后台再校准一次（多客户端/其他窗口改过）。
+          applyUiState(uiStateCache);
+          setUiLoaded(true);
+          refreshUiState().then(function (snapshot) {
+            if (alive) applyUiState(snapshot);
+          }, function () {
+            // 后台校准失败不打断已展示的缓存；用户下次切换折叠时会重新持久化。
           });
-        }, function (uiError) {
-          if (alive) setError(uiError);
-        });
+        } else {
+          prefetchUiState().then(function (snapshot) {
+            if (!alive) return;
+            applyUiState(snapshot);
+            setUiLoaded(true);
+          }, function (uiError) {
+            if (!alive) return;
+            setUiLoaded(true);
+            setError(uiError);
+          });
+        }
         return function () {
           alive = false;
         };
@@ -2720,11 +2776,14 @@ window.__ModuleLoader__.load({
             }, "管理命令"))),
         errorBar,
         h("div", { className: "dshRunnerBody" },
-          sections.length === 0
+          !(uiLoaded && configReady)
             ? h("div", { className: "dshRunnerList", "data-dsh-runner-all": "1" },
-                h("div", { className: "dshRunnerEmpty" },
-                  "还没有配置任何命令。点右上角「管理命令」新增，或在「设置 → dsh-runner」里编辑。"))
-            : h("div", { className: "dshRunnerList", "data-dsh-runner-all": "1" }, sections.map(renderSection)),
+                h("div", { className: "dshRunnerEmpty" }, "正在读取运行面板状态…"))
+            : (sections.length === 0
+              ? h("div", { className: "dshRunnerList", "data-dsh-runner-all": "1" },
+                  h("div", { className: "dshRunnerEmpty" },
+                    "还没有配置任何命令。点右上角「管理命令」新增，或在「设置 → dsh-runner」里编辑。"))
+              : h("div", { className: "dshRunnerList", "data-dsh-runner-all": "1" }, sections.map(renderSection))),
           logPane),
         conflictDialog,
         editorModal);
@@ -2977,6 +3036,10 @@ window.__ModuleLoader__.load({
       } catch (_error) {
         hostConnection = undefined;
       }
+      // 预取折叠偏好：用户点开「运行」时直接按记忆状态渲染（不先展开再折叠）。
+      void prefetchUiState().catch(function (error) {
+        logPluginError(runtimeCtx, "读取运行面板折叠状态失败", error);
+      });
       // 左侧导航「运行」入口（图标）+ 完整运行面板。
       registerSlot(ctx, "sidebar.panellist", {
         name: "sidebar.panellist",

@@ -1,8 +1,8 @@
-// dsh-runner 0.17.0 的离线冒烟测试（CI 与本地都用它）。
+// dsh-runner 0.17.1 的离线冒烟测试（CI 与本地都用它）。
 //
 // 覆盖（SPEC 第 5 节 smoke 要求）：
 // 1. 用假的 window.__ModuleLoader__ / react / localStorage 执行 client.js，确认模块 id 与注入；
-// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.17.0）；
+// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.17.1）；
 // 3. slot 注册集合恰为 6 个：conversation.composer.dock / main / sidebar.panellist /
 //    settings.section / plugins.detail.badge / plugins.detail.section；
 // 4. __test 纯函数断言：stripAnsi / formatUptime / formatBytes / commandMatchesProject /
@@ -81,7 +81,7 @@ assert.deepEqual(
 const versionMatch = /var PLUGIN_VERSION = "([^"]+)";/.exec(source);
 assert.ok(versionMatch !== null, "client.js 必须有 PLUGIN_VERSION 常量");
 assert.equal(versionMatch[1], manifest.version, "PLUGIN_VERSION 必须与 package.json version 一致");
-assert.equal(manifest.version, "0.17.0", "目标版本是 0.17.0");
+assert.equal(manifest.version, "0.17.1", "目标版本是 0.17.1");
 
 // ---- 4. 纯函数断言 ----
 assert.equal(__test.stripAnsi("\u001b[31mred\u001b[0m"), "red");
@@ -283,7 +283,7 @@ assert.equal(sidebar.component({}).props.width, 16, "默认图标尺寸 16");
 const page = mainEntry.component({});
 assert.equal(page.props["data-dsh-runner-page"], "1", "RunnerPage 根节点必须有 data-dsh-runner-page");
 assert.ok(textOf(page).includes("全部项目"), "全局运行面板应显示「全部项目」");
-assert.ok(textOf(page).includes("还没有配置任何命令"), "无配置时应提示新增命令");
+assert.ok(textOf(page).includes("正在读取运行面板状态"), "首帧未就绪时应显示加载态，不能先按展开渲染");
 
 // 6.3 composer 按钮：紧凑「▶ 运行」
 const composer = bySlot("conversation.composer.dock").component;
