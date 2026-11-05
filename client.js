@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.18.3";
+    var PLUGIN_VERSION = "0.19.0";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -192,7 +192,7 @@ window.__ModuleLoader__.load({
       ".dshRunnerHeaderFloat{position:fixed;transform:translate(-50%,-50%);z-index:9999;display:flex;align-items:center;justify-content:center;gap:4px;overflow:hidden;pointer-events:none}",
       ".dshRunnerHeaderFloat .dshRunnerDot{margin-top:0;align-self:center}",
 
-      ".dshRunnerHeaderChip{display:inline-flex;align-items:center;gap:4px;flex:0 1 auto;min-width:48px;padding:1px 7px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.06));font-size:10px;line-height:16px;white-space:nowrap;overflow:hidden}",
+      ".dshRunnerHeaderChip{display:inline-flex;align-items:center;gap:4px;flex:0 1 auto;min-width:48px;padding:1px 8px;border:none;border-radius:999px;background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.16));backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-size:10px;line-height:16px;white-space:nowrap;overflow:hidden}",
       ".dshRunnerHeaderName{font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
       ".dshRunnerHeaderProject{opacity:.55;flex:none;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
       ".dshRunnerHeaderState{opacity:.65;flex:none;white-space:nowrap}",
@@ -2977,6 +2977,7 @@ window.__ModuleLoader__.load({
         return undefined;
       }
 
+      var FAILED_CHIP_WINDOW_MS = 10 * 60 * 1000;
       var items = [];
       if (commandCount > 0) {
         for (var commandIndex = 0; commandIndex < commands.length; commandIndex += 1) {
@@ -3000,7 +3001,10 @@ window.__ModuleLoader__.load({
         for (var runnerIndex = 0; runnerIndex < runners.length; runnerIndex += 1) {
           var running = runners[runnerIndex];
           if (running === null || running === undefined) continue;
-          if (running.status !== "running" && running.status !== "starting" && running.status !== "stopping") continue;
+          var activeStatus = running.status === "running" || running.status === "starting" || running.status === "stopping";
+          var recentFailure = (running.status === "failed" || running.status === "exited")
+            && typeof running.startedAt === "number" && Date.now() - running.startedAt < FAILED_CHIP_WINDOW_MS;
+          if (!activeStatus && !recentFailure) continue;
           var runnerKey = "run:" + normalizePath(running.projectPath) + ":" + running.commandId;
           if (seen[runnerKey] === true) continue;
           seen[runnerKey] = true;

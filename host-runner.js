@@ -1359,6 +1359,11 @@ export class ProjectRunnerService {
 
   async finish(record, status, exitCode, signal, note) {
     if (record === undefined || record === null || record.finished === true) return;
+    // 自然退出（命令自身失败/结束）时，子进程可能比根进程活得更久（典型：Tauri 的 beforeDevCommand/vite），
+    // 不清理会继续占着声明端口，导致下次启动 port-conflict 或看起来"没识别到"。
+    if (record.stopRequested !== true && (status === "failed" || status === "exited")) {
+      this.killRemainingDescendants(record);
+    }
     record.finished = true;
     record.status = status;
     record.exitCode = typeof exitCode === "number" ? exitCode : undefined;
@@ -1376,6 +1381,31 @@ export class ProjectRunnerService {
       }
     }
     await this.persist();
+  }
+
+  /** 自然退出后清理本次启动的残留子进程（只杀本次启动后创建的，避免 pid 复用误杀）。 */
+  killRemainingDescendants(record) {
+    if (process.platform !== "win32") return;
+    const rootPid = record.pid;
+    if (!Number.isInteger(rootPid) || rootPid <= 0) return;
+    let tree;
+    let snapshot;
+    try {
+      tree = queryProcessTree();
+      snapshot = queryProcessSnapshot();
+    } catch (error) {
+      this.reportError("无法读取进程树，跳过残留子进程清理", error);
+      return;
+    }
+    const pids = collectTreePids(rootPid, tree);
+    pids.delete(rootPid);
+    for (const pid of pids) {
+      const info = snapshot.get(pid);
+      if (info === undefined) continue;
+      const created = typeof info.createdAt === "string" ? Date.parse(info.createdAt) : Number.NaN;
+      if (Number.isFinite(created) && created + 2000 < record.startedAt) continue;
+      this.killProcess(pid, true);
+    }
   }
 
   killProcess(pid, force) {

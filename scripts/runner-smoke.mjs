@@ -378,6 +378,35 @@ try {
   assert.notEqual(timedOut.status, "running", "ready 超时后进程不能还在 running");
   assert.equal(pidAlive(timedOut.pid), false, "ready 超时后 Host 必须杀掉进程");
 
+  // 自然退出后清理残留子进程（Tauri beforeDevCommand / vite 常见）
+  const [orphanPort] = await getFreePorts(1);
+  const orphanChild = path.join(projectRoot, "orphan-child.cjs");
+  const orphanParent = path.join(projectRoot, "orphan-parent.cjs");
+  await writeFile(orphanChild, [
+    'const net = require("node:net");',
+    'const server = net.createServer((socket) => socket.end());',
+    'server.listen(Number(process.env.SMOKE_PORT), "127.0.0.1");',
+    'server.on("error", () => process.exit(1));',
+    'setInterval(() => {}, 1000);'
+  ].join("\n"), "utf8");
+  await writeFile(orphanParent, [
+    'const { spawn } = require("node:child_process");',
+    'const path = require("node:path");',
+    'spawn(process.execPath, [path.join(__dirname, "orphan-child.cjs")], { env: process.env, stdio: "ignore", windowsHide: true });',
+    'setTimeout(() => process.exit(0), 800);'
+  ].join("\n"), "utf8");
+  const orphanCommand = makeCommand({
+    id: "orphan-cleanup",
+    title: "残留清理",
+    command: 'node "' + orphanParent + '"',
+    env: { SMOKE_PORT: String(orphanPort) }
+  });
+  await runner.start(orphanCommand, projectRoot, { commands: [orphanCommand] });
+  await waitFor(async () => await canConnect(orphanPort), 6000, "残留子进程先监听");
+  await waitFor(async () => !(await canConnect(orphanPort)), 12000, "父进程退出后残留子进程应被清理并释放端口");
+  const orphanRecord = runner.list(projectRoot).find((entry) => entry.commandId === "orphan-cleanup");
+  assert.notEqual(orphanRecord.status, "running", "父进程退出后命令不能仍显示运行中");
+
   // ── 4b) 端口契约：声明端口必须由本进程树监听，拒绝静默降级 ───────────────
   const mismatchScript = path.join(dir, "mismatch.cjs");
   await writeFile(mismatchScript, [
