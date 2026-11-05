@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.17.1";
+    var PLUGIN_VERSION = "0.18.0";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -189,6 +189,15 @@ window.__ModuleLoader__.load({
       ".dshRunnerSectionIssue{font-size:10px;line-height:15px;color:#f59e0b;white-space:nowrap}",
       ".dshRunnerSectionEmpty{font-size:11px;line-height:16px;opacity:.55;padding:6px 8px}",
       ".dshRunnerGlobalSummary{font-size:10px;line-height:15px;opacity:.6;white-space:nowrap}",
+      ".dshRunnerHeaderBar{display:flex;align-items:center;justify-content:center;flex:1 1 auto;min-width:0;overflow:hidden;padding:0 8px}",
+      ".dshRunnerHeaderChips{display:flex;align-items:center;gap:4px;min-width:0;max-width:100%;overflow-x:auto;scrollbar-width:none}",
+      ".dshRunnerHeaderChips::-webkit-scrollbar{display:none}",
+      ".dshRunnerHeaderChip{display:inline-flex;align-items:center;gap:4px;flex:none;padding:1px 7px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.06));font-size:10px;line-height:16px;white-space:nowrap}",
+      ".dshRunnerHeaderName{font-weight:500;max-width:140px;overflow:hidden;text-overflow:ellipsis}",
+      ".dshRunnerHeaderState{opacity:.65}",
+      ".dshRunnerHeaderState[data-status=running]{color:#22c55e;opacity:1}",
+      ".dshRunnerHeaderState[data-status=starting],.dshRunnerHeaderState[data-status=stopping]{color:#f59e0b;opacity:1}",
+      ".dshRunnerHeaderState[data-status=failed],.dshRunnerHeaderState[data-status=exited]{color:#f87171;opacity:1}",
       ".dshRunnerRow{display:flex;align-items:flex-start;gap:7px;padding:8px 10px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.22));min-width:0;cursor:pointer}",
       ".dshRunnerRow:last-child{border-bottom:0}",
       ".dshRunnerRow:hover{background:rgba(103,158,254,.06)}",
@@ -2790,7 +2799,89 @@ window.__ModuleLoader__.load({
     }
 
     // =====================================================================
-    // 十四、输入框下方的「运行」按钮（conversation.composer.dock）
+    // 十四、会话标题栏（conversation.session.header.actions）
+    // 当前项目命令的运行状态：居中显示「名称 + 状态」，不占用对话内容区。
+    // =====================================================================
+    function RunnerHeaderCommands(props) {
+      var config = useConfig();
+      var sessionId = props !== undefined && props.sessionId !== undefined
+        ? props.sessionId
+        : (props !== undefined && props.session !== undefined && props.session !== null ? props.session.sessionId : undefined);
+      var projectPath = useProjectPath(props !== undefined ? props.useWorkspaces : undefined, sessionId);
+      var hasProject = projectPath !== undefined && projectPath !== null && projectPath !== "";
+      var commands = hasProject ? visibleCommandsForProject(config, projectPath) : [];
+      var commandCount = commands.length;
+      var runnersPair = react.useState([]);
+      var runners = runnersPair[0];
+      var setRunners = runnersPair[1];
+
+      // 标题栏只做辅助展示：每 2 秒同步当前项目的 runner 状态；失败保持上一次状态，不打断会话。
+      react.useEffect(function () {
+        if (!hasProject || commandCount === 0) {
+          setRunners([]);
+          return undefined;
+        }
+        var alive = true;
+        var timer = null;
+        function schedule() {
+          if (alive) timer = setTimeout(tick, STATUS_POLL_MS);
+        }
+        async function tick() {
+          try {
+            var value = await rpc("project/status", { projectPath: projectPath });
+            if (!alive) return;
+            setRunners(value !== null && value !== undefined && Array.isArray(value.runners) ? value.runners : []);
+          } catch (statusError) {
+            // 辅助展示失败：保留旧状态。
+          }
+          schedule();
+        }
+        tick();
+        return function () {
+          alive = false;
+          clearTimeout(timer);
+        };
+      }, [hasProject, projectPath, commandCount]);
+
+      if (commandCount === 0) return null;
+
+      var runnerByCommand = {};
+      for (var i = 0; i < runners.length; i += 1) {
+        var runner = runners[i];
+        if (runner !== null && runner !== undefined && typeof runner.commandId === "string") {
+          runnerByCommand[runner.commandId] = runner;
+        }
+      }
+
+      return h("div", {
+        className: "dshRunnerHeaderBar",
+        "data-dsh-runner-header": "1",
+        "aria-label": "当前项目运行状态"
+      },
+        h("div", { className: "dshRunnerHeaderChips" },
+          commands.map(function (command) {
+            var runner = runnerByCommand[command.id];
+            var status = runner !== undefined && typeof runner.status === "string" ? runner.status : "idle";
+            var statusText = runnerStatusText(status);
+            var ports = Array.isArray(command.ports) ? command.ports : [];
+            var tooltip = String(command.title) + " · " + statusText
+              + (ports.length > 0 ? " · 端口 " + ports.join("、") : "")
+              + (typeof command.command === "string" && command.command !== "" ? " · " + command.command : "");
+            return h("span", {
+              key: command.id,
+              className: "dshRunnerHeaderChip",
+              "data-command-id": command.id,
+              "data-status": status,
+              title: tooltip
+            },
+              h("span", { className: "dshRunnerDot", "data-status": status, title: statusText }),
+              h("span", { className: "dshRunnerHeaderName" }, String(command.title)),
+              h("span", { className: "dshRunnerHeaderState", "data-status": status }, statusText));
+          })));
+    }
+
+    // =====================================================================
+    // 十五、输入框下方的「运行」按钮（conversation.composer.dock）
     // =====================================================================
     function LimobComposerButton(props) {
       var config = useConfig();
@@ -3048,6 +3139,12 @@ window.__ModuleLoader__.load({
         label: PANEL_LABEL
       }, RunnerPanelIcon);
       registerSlot(ctx, "main", { name: "main", key: PANEL_ID }, RunnerPage);
+      // 会话标题栏：当前项目命令的运行状态（居中，名称 + 状态）。
+      registerSlot(ctx, "conversation.session.header.actions", {
+        name: "conversation.session.header.actions",
+        id: "dsh-runner-status",
+        order: 30
+      }, RunnerHeaderCommands);
       // 输入框下方紧凑「▶ 运行」按钮（只做启停重启，不创建终端）。
       registerSlot(ctx, "conversation.composer.dock", {
         name: "conversation.composer.dock",

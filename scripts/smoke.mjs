@@ -1,8 +1,8 @@
-// dsh-runner 0.17.1 的离线冒烟测试（CI 与本地都用它）。
+// dsh-runner 0.18.0 的离线冒烟测试（CI 与本地都用它）。
 //
 // 覆盖（SPEC 第 5 节 smoke 要求）：
 // 1. 用假的 window.__ModuleLoader__ / react / localStorage 执行 client.js，确认模块 id 与注入；
-// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.17.1）；
+// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.18.0）；
 // 3. slot 注册集合恰为 6 个：conversation.composer.dock / main / sidebar.panellist /
 //    settings.section / plugins.detail.badge / plugins.detail.section；
 // 4. __test 纯函数断言：stripAnsi / formatUptime / formatBytes / commandMatchesProject /
@@ -81,7 +81,7 @@ assert.deepEqual(
 const versionMatch = /var PLUGIN_VERSION = "([^"]+)";/.exec(source);
 assert.ok(versionMatch !== null, "client.js 必须有 PLUGIN_VERSION 常量");
 assert.equal(versionMatch[1], manifest.version, "PLUGIN_VERSION 必须与 package.json version 一致");
-assert.equal(manifest.version, "0.17.1", "目标版本是 0.17.1");
+assert.equal(manifest.version, "0.18.0", "目标版本是 0.18.0");
 
 // ---- 4. 纯函数断言 ----
 assert.equal(__test.stripAnsi("\u001b[31mred\u001b[0m"), "red");
@@ -230,6 +230,7 @@ assert.deepEqual(
   registered.map((entry) => entry.options.name).sort(),
   [
     "conversation.composer.dock",
+    "conversation.session.header.actions",
     "main",
     "plugins.detail.badge",
     "plugins.detail.section",
@@ -247,6 +248,10 @@ assert.equal(sidebar.options.label, "运行");
 const mainEntry = bySlot("main");
 assert.equal(mainEntry.options.key, "dsh-runner");
 assert.equal(bySlot("settings.section").options.label, "dsh-runner");
+const headerEntry = bySlot("conversation.session.header.actions");
+assert.equal(headerEntry.options.id, "dsh-runner-status");
+assert.equal(headerEntry.options.order, 30);
+assert.equal(headerEntry.component({}), null, "无项目会话时标题栏状态条不应渲染");
 
 // ---- 6. 最小 props 渲染 ----
 function collect(tree, predicate, found = []) {
