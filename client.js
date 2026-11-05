@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.18.2";
+    var PLUGIN_VERSION = "0.18.3";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -189,12 +189,13 @@ window.__ModuleLoader__.load({
       ".dshRunnerSectionIssue{font-size:10px;line-height:15px;color:#f59e0b;white-space:nowrap}",
       ".dshRunnerSectionEmpty{font-size:11px;line-height:16px;opacity:.55;padding:6px 8px}",
       ".dshRunnerGlobalSummary{font-size:10px;line-height:15px;opacity:.6;white-space:nowrap}",
-      ".dshRunnerHeaderFloat{position:fixed;transform:translate(-50%,-50%);z-index:9999;display:flex;align-items:center;gap:4px;max-width:min(58vw,600px);overflow:hidden;pointer-events:none}",
+      ".dshRunnerHeaderFloat{position:fixed;transform:translate(-50%,-50%);z-index:9999;display:flex;align-items:center;justify-content:center;gap:4px;overflow:hidden;pointer-events:none}",
+      ".dshRunnerHeaderFloat .dshRunnerDot{margin-top:0;align-self:center}",
 
-      ".dshRunnerHeaderChip{display:inline-flex;align-items:center;gap:4px;flex:none;padding:1px 7px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.06));font-size:10px;line-height:16px;white-space:nowrap}",
-      ".dshRunnerHeaderName{font-weight:500;max-width:140px;overflow:hidden;text-overflow:ellipsis}",
-      ".dshRunnerHeaderProject{opacity:.55;max-width:110px;overflow:hidden;text-overflow:ellipsis}",
-      ".dshRunnerHeaderState{opacity:.65}",
+      ".dshRunnerHeaderChip{display:inline-flex;align-items:center;gap:4px;flex:0 1 auto;min-width:48px;padding:1px 7px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.06));font-size:10px;line-height:16px;white-space:nowrap;overflow:hidden}",
+      ".dshRunnerHeaderName{font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+      ".dshRunnerHeaderProject{opacity:.55;flex:none;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+      ".dshRunnerHeaderState{opacity:.65;flex:none;white-space:nowrap}",
       ".dshRunnerHeaderState[data-status=running]{color:#22c55e;opacity:1}",
       ".dshRunnerHeaderState[data-status=starting],.dshRunnerHeaderState[data-status=stopping]{color:#f59e0b;opacity:1}",
       ".dshRunnerHeaderState[data-status=failed],.dshRunnerHeaderState[data-status=exited]{color:#f87171;opacity:1}",
@@ -2882,9 +2883,11 @@ window.__ModuleLoader__.load({
             && typeof overlay.getTitlebarAreaRect === "function") {
             var titleRect = overlay.getTitlebarAreaRect();
             if (titleRect.width > 0 && titleRect.height > 0) {
+              var windowWidth = typeof window !== "undefined" ? window.innerWidth : titleRect.width;
               setPos({
                 top: titleRect.y + titleRect.height / 2,
-                left: (typeof window !== "undefined" ? window.innerWidth : titleRect.width) / 2
+                left: windowWidth / 2,
+                maxWidth: Math.max(240, Math.min(titleRect.width - 260, windowWidth - 300))
               });
               return;
             }
@@ -2914,7 +2917,8 @@ window.__ModuleLoader__.load({
           }
           setPos({
             top: rect.top + Math.min(25, Math.max(12, rect.height / 2)),
-            left: rect.left + rect.width / 2
+            left: rect.left + rect.width / 2,
+            maxWidth: Math.max(240, rect.width - 240)
           });
         }
         measure();
@@ -3041,7 +3045,11 @@ window.__ModuleLoader__.load({
       return h("div", {
         className: "dshRunnerHeaderFloat",
         "data-dsh-runner-header": "1",
-        style: { top: pos.top + "px", left: pos.left + "px" },
+        style: {
+          top: pos.top + "px",
+          left: pos.left + "px",
+          maxWidth: (typeof pos.maxWidth === "number" ? pos.maxWidth : 600) + "px"
+        },
         "aria-label": "运行状态"
       },
         items.map(function (item) {

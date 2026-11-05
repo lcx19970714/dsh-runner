@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.18.3
+
+### Fixed
+
+- 标题栏状态条**最后一个 chip 被截断**：容器原先写死 `max-width: min(58vw, 600px)` 且 chip 不收缩，
+  超出后被 `overflow:hidden` 硬切。现在按标题栏实测可用宽度动态限制，chip 允许收缩、项目名/命令名
+  内部省略（保留状态文字），不再整块裁掉。
+- 状态**小圆点与文字不居中**：复用列表行的 `.dshRunnerDot` 带 `margin-top:6px`，放进 chip 后偏下；
+  在标题栏 chip 内覆写为 `margin-top:0; align-self:center`。
+
 ## 0.18.2
 
 ### Fixed / Changed
