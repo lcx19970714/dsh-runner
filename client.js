@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.18.0";
+    var PLUGIN_VERSION = "0.18.1";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -189,9 +189,8 @@ window.__ModuleLoader__.load({
       ".dshRunnerSectionIssue{font-size:10px;line-height:15px;color:#f59e0b;white-space:nowrap}",
       ".dshRunnerSectionEmpty{font-size:11px;line-height:16px;opacity:.55;padding:6px 8px}",
       ".dshRunnerGlobalSummary{font-size:10px;line-height:15px;opacity:.6;white-space:nowrap}",
-      ".dshRunnerHeaderBar{display:flex;align-items:center;justify-content:center;flex:1 1 auto;min-width:0;overflow:hidden;padding:0 8px}",
-      ".dshRunnerHeaderChips{display:flex;align-items:center;gap:4px;min-width:0;max-width:100%;overflow-x:auto;scrollbar-width:none}",
-      ".dshRunnerHeaderChips::-webkit-scrollbar{display:none}",
+      ".dshRunnerHeaderFloat{position:fixed;transform:translate(-50%,-50%);z-index:8;display:flex;align-items:center;gap:4px;max-width:min(58vw,600px);overflow:hidden;pointer-events:none}",
+
       ".dshRunnerHeaderChip{display:inline-flex;align-items:center;gap:4px;flex:none;padding:1px 7px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.06));font-size:10px;line-height:16px;white-space:nowrap}",
       ".dshRunnerHeaderName{font-weight:500;max-width:140px;overflow:hidden;text-overflow:ellipsis}",
       ".dshRunnerHeaderState{opacity:.65}",
@@ -2802,20 +2801,29 @@ window.__ModuleLoader__.load({
     // 十四、会话标题栏（conversation.session.header.actions）
     // 当前项目命令的运行状态：居中显示「名称 + 状态」，不占用对话内容区。
     // =====================================================================
-    function RunnerHeaderCommands(props) {
+    function RunnerHeaderStatus(props) {
       var config = useConfig();
-      var sessionId = props !== undefined && props.sessionId !== undefined
+      var active = useActiveSession(props);
+      var propSessionId = props !== undefined && props.sessionId !== undefined
         ? props.sessionId
         : (props !== undefined && props.session !== undefined && props.session !== null ? props.session.sessionId : undefined);
-      var projectPath = useProjectPath(props !== undefined ? props.useWorkspaces : undefined, sessionId);
+      var projectPath = useProjectPath(props !== undefined ? props.useWorkspaces : undefined, propSessionId);
+      if (projectPath === undefined || projectPath === null || projectPath === "") {
+        projectPath = active !== null && active !== undefined && typeof active.projectPath === "string" && active.projectPath !== ""
+          ? active.projectPath
+          : undefined;
+      }
       var hasProject = projectPath !== undefined && projectPath !== null && projectPath !== "";
       var commands = hasProject ? visibleCommandsForProject(config, projectPath) : [];
       var commandCount = commands.length;
       var runnersPair = react.useState([]);
       var runners = runnersPair[0];
       var setRunners = runnersPair[1];
+      var posPair = react.useState(null);
+      var pos = posPair[0];
+      var setPos = posPair[1];
 
-      // 标题栏只做辅助展示：每 2 秒同步当前项目的 runner 状态；失败保持上一次状态，不打断会话。
+      // 标题栏只做辅助展示：每 2 秒同步 runner 状态；失败保持上一次状态。
       react.useEffect(function () {
         if (!hasProject || commandCount === 0) {
           setRunners([]);
@@ -2828,7 +2836,7 @@ window.__ModuleLoader__.load({
         }
         async function tick() {
           try {
-            var value = await rpc("project/status", { projectPath: projectPath });
+            var value = await rpc("project/status", {});
             if (!alive) return;
             setRunners(value !== null && value !== undefined && Array.isArray(value.runners) ? value.runners : []);
           } catch (statusError) {
@@ -2841,43 +2849,96 @@ window.__ModuleLoader__.load({
           alive = false;
           clearTimeout(timer);
         };
-      }, [hasProject, projectPath, commandCount]);
+      }, [hasProject, commandCount]);
 
-      if (commandCount === 0) return null;
+      // 按会话标题栏（header[data-window-drag]）的真实位置居中；overlay 层是 frame 级、
+      // 点击穿透，所以既不占标题栏布局，也不会压住标题/按钮的点击。
+      react.useEffect(function () {
+        var alive = true;
+        var attempts = 0;
+        var header = null;
+        var observer = null;
+        function measure() {
+          if (!alive) return;
+          if (typeof document === "undefined") return;
+          var element = document.querySelector("header[data-window-drag]");
+          if (element === null) {
+            if (attempts < 20) {
+              attempts += 1;
+              setTimeout(measure, 150);
+            } else {
+              setPos(null);
+            }
+            return;
+          }
+          if (header !== element) {
+            header = element;
+            if (observer !== null) observer.disconnect();
+            if (typeof ResizeObserver !== "undefined") {
+              observer = new ResizeObserver(measure);
+              observer.observe(element);
+            }
+          }
+          var rect = element.getBoundingClientRect();
+          if (rect.width <= 0) {
+            setPos(null);
+            return;
+          }
+          setPos({
+            top: rect.top + Math.min(25, Math.max(12, rect.height / 2)),
+            left: rect.left + rect.width / 2
+          });
+        }
+        measure();
+        if (typeof window !== "undefined") window.addEventListener("resize", measure);
+        // 面板切换/侧边栏折叠时 header 节点可能被替换：低频重新测量，找不到就隐藏。
+        var ticker = setInterval(measure, 1500);
+        return function () {
+          alive = false;
+          clearInterval(ticker);
+          if (observer !== null) observer.disconnect();
+          if (typeof window !== "undefined") window.removeEventListener("resize", measure);
+        };
+      }, []);
+
+      if (commandCount === 0 || pos === null) return null;
 
       var runnerByCommand = {};
       for (var i = 0; i < runners.length; i += 1) {
         var runner = runners[i];
-        if (runner !== null && runner !== undefined && typeof runner.commandId === "string") {
-          runnerByCommand[runner.commandId] = runner;
-        }
+        if (runner === null || runner === undefined || typeof runner.commandId !== "string") continue;
+        if (typeof runner.projectPath !== "string") continue;
+        var command = config !== null && config !== undefined && Array.isArray(config.commands)
+          ? config.commands.filter(function (item) { return item !== null && item !== undefined && item.id === runner.commandId; })[0]
+          : undefined;
+        if (command !== undefined && command.scope === "project" && !commandMatchesProject(command, runner.projectPath)) continue;
+        if (runnerByCommand[runner.commandId] === undefined) runnerByCommand[runner.commandId] = runner;
       }
 
       return h("div", {
-        className: "dshRunnerHeaderBar",
+        className: "dshRunnerHeaderFloat",
         "data-dsh-runner-header": "1",
+        style: { top: pos.top + "px", left: pos.left + "px" },
         "aria-label": "当前项目运行状态"
       },
-        h("div", { className: "dshRunnerHeaderChips" },
-          commands.map(function (command) {
-            var runner = runnerByCommand[command.id];
-            var status = runner !== undefined && typeof runner.status === "string" ? runner.status : "idle";
-            var statusText = runnerStatusText(status);
-            var ports = Array.isArray(command.ports) ? command.ports : [];
-            var tooltip = String(command.title) + " · " + statusText
-              + (ports.length > 0 ? " · 端口 " + ports.join("、") : "")
-              + (typeof command.command === "string" && command.command !== "" ? " · " + command.command : "");
-            return h("span", {
-              key: command.id,
-              className: "dshRunnerHeaderChip",
-              "data-command-id": command.id,
-              "data-status": status,
-              title: tooltip
-            },
-              h("span", { className: "dshRunnerDot", "data-status": status, title: statusText }),
-              h("span", { className: "dshRunnerHeaderName" }, String(command.title)),
-              h("span", { className: "dshRunnerHeaderState", "data-status": status }, statusText));
-          })));
+        commands.map(function (command) {
+          var runner = runnerByCommand[command.id];
+          var status = runner !== undefined && typeof runner.status === "string" ? runner.status : "idle";
+          var statusText = runnerStatusText(status);
+          var ports = Array.isArray(command.ports) ? command.ports : [];
+          var tooltip = String(command.title) + " · " + statusText
+            + (ports.length > 0 ? " · 端口 " + ports.join("、") : "");
+          return h("span", {
+            key: command.id,
+            className: "dshRunnerHeaderChip",
+            "data-command-id": command.id,
+            "data-status": status,
+            title: tooltip
+          },
+            h("span", { className: "dshRunnerDot", "data-status": status, title: statusText }),
+            h("span", { className: "dshRunnerHeaderName" }, String(command.title)),
+            h("span", { className: "dshRunnerHeaderState", "data-status": status }, statusText));
+        }));
     }
 
     // =====================================================================
@@ -3139,12 +3200,12 @@ window.__ModuleLoader__.load({
         label: PANEL_LABEL
       }, RunnerPanelIcon);
       registerSlot(ctx, "main", { name: "main", key: PANEL_ID }, RunnerPage);
-      // 会话标题栏：当前项目命令的运行状态（居中，名称 + 状态）。
-      registerSlot(ctx, "conversation.session.header.actions", {
-        name: "conversation.session.header.actions",
+      // 标题栏运行状态：走 frame 级 overlay（空会话也显示、不影响标题栏布局），按实测位置居中。
+      registerSlot(ctx, "shell.overlay", {
+        name: "shell.overlay",
         id: "dsh-runner-status",
-        order: 30
-      }, RunnerHeaderCommands);
+        order: 40
+      }, RunnerHeaderStatus);
       // 输入框下方紧凑「▶ 运行」按钮（只做启停重启，不创建终端）。
       registerSlot(ctx, "conversation.composer.dock", {
         name: "conversation.composer.dock",

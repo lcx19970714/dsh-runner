@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.18.1
+
+### Fixed
+
+- **标题栏运行状态不显示**：0.18.0 注册在 `conversation.session.header.actions`，但 DSH 的该区域有两个问题：
+  1. **空白/新会话会隐藏整个 title/actions 区**（`hideChrome`），所以看不到；
+  2. 该区域是 `flex:none` 的右对齐操作区，本来也不适合放"居中"的长条。
+  改用 **frame 级 `shell.overlay`**（点击穿透、空会话也存在），用 JS 测量 `header[data-window-drag]`
+  的真实位置居中放置，不再依赖标题栏内部布局；面板切换/侧边栏折叠后会重新测量，找不到标题栏时自动隐藏。
+- 项目解析增加兜底：标题栏拿不到 `sessionId` 时用当前活跃会话所属工作区，避免因为 props 缺失整条不渲染。
+
 ## 0.18.0
 
 ### Added（标题栏运行状态）
