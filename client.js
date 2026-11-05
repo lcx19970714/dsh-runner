@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.18.1";
+    var PLUGIN_VERSION = "0.18.2";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -189,10 +189,11 @@ window.__ModuleLoader__.load({
       ".dshRunnerSectionIssue{font-size:10px;line-height:15px;color:#f59e0b;white-space:nowrap}",
       ".dshRunnerSectionEmpty{font-size:11px;line-height:16px;opacity:.55;padding:6px 8px}",
       ".dshRunnerGlobalSummary{font-size:10px;line-height:15px;opacity:.6;white-space:nowrap}",
-      ".dshRunnerHeaderFloat{position:fixed;transform:translate(-50%,-50%);z-index:8;display:flex;align-items:center;gap:4px;max-width:min(58vw,600px);overflow:hidden;pointer-events:none}",
+      ".dshRunnerHeaderFloat{position:fixed;transform:translate(-50%,-50%);z-index:9999;display:flex;align-items:center;gap:4px;max-width:min(58vw,600px);overflow:hidden;pointer-events:none}",
 
       ".dshRunnerHeaderChip{display:inline-flex;align-items:center;gap:4px;flex:none;padding:1px 7px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.06));font-size:10px;line-height:16px;white-space:nowrap}",
       ".dshRunnerHeaderName{font-weight:500;max-width:140px;overflow:hidden;text-overflow:ellipsis}",
+      ".dshRunnerHeaderProject{opacity:.55;max-width:110px;overflow:hidden;text-overflow:ellipsis}",
       ".dshRunnerHeaderState{opacity:.65}",
       ".dshRunnerHeaderState[data-status=running]{color:#22c55e;opacity:1}",
       ".dshRunnerHeaderState[data-status=starting],.dshRunnerHeaderState[data-status=stopping]{color:#f59e0b;opacity:1}",
@@ -2807,40 +2808,56 @@ window.__ModuleLoader__.load({
       var propSessionId = props !== undefined && props.sessionId !== undefined
         ? props.sessionId
         : (props !== undefined && props.session !== undefined && props.session !== null ? props.session.sessionId : undefined);
-      var projectPath = useProjectPath(props !== undefined ? props.useWorkspaces : undefined, propSessionId);
-      if (projectPath === undefined || projectPath === null || projectPath === "") {
-        projectPath = active !== null && active !== undefined && typeof active.projectPath === "string" && active.projectPath !== ""
+      var currentProjectPath = useProjectPath(props !== undefined ? props.useWorkspaces : undefined, propSessionId);
+      if (currentProjectPath === undefined || currentProjectPath === null || currentProjectPath === "") {
+        currentProjectPath = active !== null && active !== undefined && typeof active.projectPath === "string" && active.projectPath !== ""
           ? active.projectPath
           : undefined;
       }
-      var hasProject = projectPath !== undefined && projectPath !== null && projectPath !== "";
-      var commands = hasProject ? visibleCommandsForProject(config, projectPath) : [];
+      var hasProject = currentProjectPath !== undefined && currentProjectPath !== null && currentProjectPath !== "";
+      var commands = hasProject ? visibleCommandsForProject(config, currentProjectPath) : [];
       var commandCount = commands.length;
       var runnersPair = react.useState([]);
       var runners = runnersPair[0];
       var setRunners = runnersPair[1];
+      var diagnosePair = react.useState([]);
+      var diagnoseEntries = diagnosePair[0];
+      var setDiagnoseEntries = diagnosePair[1];
       var posPair = react.useState(null);
       var pos = posPair[0];
       var setPos = posPair[1];
 
-      // 标题栏只做辅助展示：每 2 秒同步 runner 状态；失败保持上一次状态。
+      // 状态轮询：当前项目有命令时显示这些命令；没有命令时显示所有项目正在运行的服务。
       react.useEffect(function () {
-        if (!hasProject || commandCount === 0) {
+        if (!hasProject) {
           setRunners([]);
+          setDiagnoseEntries([]);
           return undefined;
         }
         var alive = true;
         var timer = null;
+        var tickCount = 0;
         function schedule() {
           if (alive) timer = setTimeout(tick, STATUS_POLL_MS);
         }
         async function tick() {
+          tickCount += 1;
           try {
             var value = await rpc("project/status", {});
             if (!alive) return;
             setRunners(value !== null && value !== undefined && Array.isArray(value.runners) ? value.runners : []);
           } catch (statusError) {
             // 辅助展示失败：保留旧状态。
+          }
+          if (alive && tickCount % 3 === 1) {
+            try {
+              var diagnosed = await rpc("project/diagnose", {});
+              if (alive) {
+                setDiagnoseEntries(diagnosed !== null && diagnosed !== undefined && Array.isArray(diagnosed.entries) ? diagnosed.entries : []);
+              }
+            } catch (diagnoseError) {
+              // 同上。
+            }
           }
           schedule();
         }
@@ -2849,18 +2866,29 @@ window.__ModuleLoader__.load({
           alive = false;
           clearTimeout(timer);
         };
-      }, [hasProject, commandCount]);
+      }, [hasProject]);
 
-      // 按会话标题栏（header[data-window-drag]）的真实位置居中；overlay 层是 frame 级、
-      // 点击穿透，所以既不占标题栏布局，也不会压住标题/按钮的点击。
+      // 位置：优先放进窗口标题栏（Windows titleBarOverlay 的标题栏区）；
+      // 网页端没有该区域时退回会话标题栏，仍然居中。
       react.useEffect(function () {
         var alive = true;
         var attempts = 0;
         var header = null;
         var observer = null;
         function measure() {
-          if (!alive) return;
-          if (typeof document === "undefined") return;
+          if (!alive || typeof document === "undefined") return;
+          var overlay = typeof navigator !== "undefined" ? navigator.windowControlsOverlay : undefined;
+          if (overlay !== undefined && overlay !== null && overlay.visible === true
+            && typeof overlay.getTitlebarAreaRect === "function") {
+            var titleRect = overlay.getTitlebarAreaRect();
+            if (titleRect.width > 0 && titleRect.height > 0) {
+              setPos({
+                top: titleRect.y + titleRect.height / 2,
+                left: (typeof window !== "undefined" ? window.innerWidth : titleRect.width) / 2
+              });
+              return;
+            }
+          }
           var element = document.querySelector("header[data-window-drag]");
           if (element === null) {
             if (attempts < 20) {
@@ -2891,7 +2919,6 @@ window.__ModuleLoader__.load({
         }
         measure();
         if (typeof window !== "undefined") window.addEventListener("resize", measure);
-        // 面板切换/侧边栏折叠时 header 节点可能被替换：低频重新测量，找不到就隐藏。
         var ticker = setInterval(measure, 1500);
         return function () {
           alive = false;
@@ -2901,43 +2928,136 @@ window.__ModuleLoader__.load({
         };
       }, []);
 
-      if (commandCount === 0 || pos === null) return null;
-
-      var runnerByCommand = {};
-      for (var i = 0; i < runners.length; i += 1) {
-        var runner = runners[i];
-        if (runner === null || runner === undefined || typeof runner.commandId !== "string") continue;
-        if (typeof runner.projectPath !== "string") continue;
-        var command = config !== null && config !== undefined && Array.isArray(config.commands)
-          ? config.commands.filter(function (item) { return item !== null && item !== undefined && item.id === runner.commandId; })[0]
-          : undefined;
-        if (command !== undefined && command.scope === "project" && !commandMatchesProject(command, runner.projectPath)) continue;
-        if (runnerByCommand[runner.commandId] === undefined) runnerByCommand[runner.commandId] = runner;
+      function shortProject(path) {
+        if (typeof path !== "string" || path === "") return "";
+        var parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
+        return parts.length === 0 ? path : parts[parts.length - 1];
       }
+
+      function sameProject(left, right) {
+        return normalizePath(left) === normalizePath(right);
+      }
+
+      var configById = {};
+      if (config !== null && config !== undefined && Array.isArray(config.commands)) {
+        for (var configIndex = 0; configIndex < config.commands.length; configIndex += 1) {
+          var configCommand = config.commands[configIndex];
+          if (configCommand !== null && configCommand !== undefined && typeof configCommand.id === "string") {
+            configById[configCommand.id] = configCommand;
+          }
+        }
+      }
+
+      function runnerFor(command) {
+        for (var i = 0; i < runners.length; i += 1) {
+          var runner = runners[i];
+          if (runner === null || runner === undefined || runner.commandId !== command.id) continue;
+          if (typeof runner.projectPath !== "string") continue;
+          if (command.scope === "project" && !commandMatchesProject(command, runner.projectPath)) continue;
+          if (command.scope !== "project" && hasProject && !sameProject(runner.projectPath, currentProjectPath)) continue;
+          return runner;
+        }
+        return undefined;
+      }
+
+      function externalFor(command, projectPath) {
+        for (var i = 0; i < diagnoseEntries.length; i += 1) {
+          var entry = diagnoseEntries[i];
+          if (entry === null || entry === undefined || entry.commandId !== command.id) continue;
+          if (entry.listening !== true) continue;
+          if (entry.occupant === null || entry.occupant === undefined) continue;
+          if (entry.occupant.managed === true) continue;
+          if (projectPath !== undefined && typeof entry.projectPath === "string" && !sameProject(entry.projectPath, projectPath)) continue;
+          return entry;
+        }
+        return undefined;
+      }
+
+      var items = [];
+      if (commandCount > 0) {
+        for (var commandIndex = 0; commandIndex < commands.length; commandIndex += 1) {
+          var command = commands[commandIndex];
+          var commandRunner = runnerFor(command);
+          var externalEntry = commandRunner === undefined ? externalFor(command, currentProjectPath) : undefined;
+          var commandStatus = commandRunner !== undefined && typeof commandRunner.status === "string"
+            ? commandRunner.status
+            : (externalEntry !== undefined ? "external" : "idle");
+          items.push({
+            key: "cmd:" + command.id,
+            title: String(command.title),
+            project: "",
+            status: commandStatus,
+            ports: Array.isArray(command.ports) ? command.ports : []
+          });
+        }
+      } else {
+        // 当前项目没有命令：显示所有项目正在运行的服务（托管 + 外部占用）。
+        var seen = {};
+        for (var runnerIndex = 0; runnerIndex < runners.length; runnerIndex += 1) {
+          var running = runners[runnerIndex];
+          if (running === null || running === undefined) continue;
+          if (running.status !== "running" && running.status !== "starting" && running.status !== "stopping") continue;
+          var runnerKey = "run:" + normalizePath(running.projectPath) + ":" + running.commandId;
+          if (seen[runnerKey] === true) continue;
+          seen[runnerKey] = true;
+          items.push({
+            key: runnerKey,
+            title: typeof running.title === "string" && running.title !== "" ? running.title : String(running.commandId),
+            project: shortProject(running.projectPath),
+            status: running.status,
+            ports: Array.isArray(running.ports) ? running.ports : []
+          });
+        }
+        for (var entryIndex = 0; entryIndex < diagnoseEntries.length; entryIndex += 1) {
+          var entry = diagnoseEntries[entryIndex];
+          if (entry === null || entry === undefined || entry.listening !== true) continue;
+          if (entry.occupant === null || entry.occupant === undefined || entry.occupant.managed === true) continue;
+          var entryKey = "ext:" + normalizePath(entry.projectPath) + ":" + entry.commandId + ":" + String(entry.port);
+          if (seen[entryKey] === true) continue;
+          var managedSame = false;
+          for (var runIndex = 0; runIndex < runners.length; runIndex += 1) {
+            var candidate = runners[runIndex];
+            if (candidate !== null && candidate !== undefined && candidate.commandId === entry.commandId
+              && sameProject(candidate.projectPath, entry.projectPath)
+              && (candidate.status === "running" || candidate.status === "starting")) {
+              managedSame = true;
+              break;
+            }
+          }
+          if (managedSame) continue;
+          seen[entryKey] = true;
+          items.push({
+            key: entryKey,
+            title: typeof entry.title === "string" && entry.title !== "" ? entry.title : String(entry.commandId),
+            project: shortProject(entry.projectPath),
+            status: "external",
+            ports: [entry.port]
+          });
+        }
+      }
+
+      if (items.length === 0 || pos === null) return null;
 
       return h("div", {
         className: "dshRunnerHeaderFloat",
         "data-dsh-runner-header": "1",
         style: { top: pos.top + "px", left: pos.left + "px" },
-        "aria-label": "当前项目运行状态"
+        "aria-label": "运行状态"
       },
-        commands.map(function (command) {
-          var runner = runnerByCommand[command.id];
-          var status = runner !== undefined && typeof runner.status === "string" ? runner.status : "idle";
-          var statusText = runnerStatusText(status);
-          var ports = Array.isArray(command.ports) ? command.ports : [];
-          var tooltip = String(command.title) + " · " + statusText
-            + (ports.length > 0 ? " · 端口 " + ports.join("、") : "");
+        items.map(function (item) {
+          var statusText = item.status === "external" ? "外部运行中" : runnerStatusText(item.status);
+          var tooltip = (item.project === "" ? "" : item.project + " · ") + item.title + " · " + statusText
+            + (item.ports.length > 0 ? " · 端口 " + item.ports.join("、") : "");
           return h("span", {
-            key: command.id,
+            key: item.key,
             className: "dshRunnerHeaderChip",
-            "data-command-id": command.id,
-            "data-status": status,
+            "data-status": item.status,
             title: tooltip
           },
-            h("span", { className: "dshRunnerDot", "data-status": status, title: statusText }),
-            h("span", { className: "dshRunnerHeaderName" }, String(command.title)),
-            h("span", { className: "dshRunnerHeaderState", "data-status": status }, statusText));
+            h("span", { className: "dshRunnerDot", "data-status": item.status, title: statusText }),
+            item.project === "" ? null : h("span", { className: "dshRunnerHeaderProject" }, item.project),
+            h("span", { className: "dshRunnerHeaderName" }, item.title),
+            h("span", { className: "dshRunnerHeaderState", "data-status": item.status }, statusText));
         }));
     }
 
