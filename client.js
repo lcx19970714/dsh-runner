@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.20.0";
+    var PLUGIN_VERSION = "0.21.0";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -197,6 +197,13 @@ window.__ModuleLoader__.load({
       ".dshRunnerSectionEmpty{font-size:11px;line-height:16px;opacity:.55;padding:6px 8px}",
       ".dshRunnerGlobalSummary{font-size:10px;line-height:15px;opacity:.6;white-space:nowrap}",
       ".dshRunnerHeaderFloat{position:fixed;transform:translate(-50%,-50%);z-index:9999;display:flex;align-items:center;justify-content:center;gap:4px;overflow:hidden;pointer-events:none}",
+      ".dshRunnerHeaderChip{pointer-events:auto}",
+      ".dshRunnerHeaderActions{display:none;align-items:center;gap:2px;flex:none}",
+      ".dshRunnerHeaderChip:hover .dshRunnerHeaderState,.dshRunnerHeaderChip:focus-within .dshRunnerHeaderState{display:none}",
+      ".dshRunnerHeaderChip:hover .dshRunnerHeaderActions,.dshRunnerHeaderChip:focus-within .dshRunnerHeaderActions{display:inline-flex}",
+      ".dshRunnerHeaderBtn{width:16px;height:16px;padding:0;border:none;border-radius:999px;background:rgba(128,128,128,.2);color:inherit;font-size:9px;line-height:16px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}",
+      ".dshRunnerHeaderBtn:hover{background:rgba(128,128,128,.34)}",
+      ".dshRunnerHeaderBtn:disabled{opacity:.45;cursor:default}",
       ".dshRunnerHeaderFloat .dshRunnerDot{margin-top:0;align-self:center}",
 
       ".dshRunnerHeaderChip{display:inline-flex;align-items:center;gap:4px;flex:0 1 auto;min-width:48px;padding:1px 8px;border:none;border-radius:999px;background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.16));backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-size:10px;line-height:16px;white-space:nowrap;overflow:hidden}",
@@ -814,6 +821,20 @@ window.__ModuleLoader__.load({
 
     function projectColorPalette() {
       return PROJECT_COLOR_PALETTE;
+    }
+
+    /**
+     * 顶部 chip 的可执行动作。
+     * - 外部占用（external）只读：结束进程属于破坏性操作，统一留在「运行」面板里做；
+     * - 未运行 → 启动；运行中/启动中 → 停止 + 重启；停止中 → 只显示，不重复操作。
+     */
+    function headerActionsFor(status, hasRunner, external) {
+      if (external === true) return { start: false, stop: false, restart: false };
+      if (status === "running" || status === "starting") {
+        return { start: false, stop: true, restart: hasRunner === true };
+      }
+      if (status === "stopping") return { start: false, stop: false, restart: false };
+      return { start: true, stop: false, restart: false };
     }
 
     /**
@@ -2956,6 +2977,35 @@ window.__ModuleLoader__.load({
       var posPair = react.useState(null);
       var pos = posPair[0];
       var setPos = posPair[1];
+      var actionKeyPair = react.useState(null);
+      var actionKey = actionKeyPair[0];
+      var setActionKey = actionKeyPair[1];
+      var actionErrorPair = react.useState(null);
+      var actionError = actionErrorPair[0];
+      var setActionError = actionErrorPair[1];
+
+      async function runHeaderAction(item, action) {
+        if (item.projectPath === undefined || item.projectPath === null || item.projectPath === ""
+          || typeof item.commandId !== "string" || item.commandId === "") return;
+        setActionKey(item.key);
+        setActionError(null);
+        try {
+          await rpc("project/" + action, { projectPath: item.projectPath, commandId: item.commandId });
+          var value = await rpc("project/status", {});
+          setRunners(value !== null && value !== undefined && Array.isArray(value.runners) ? value.runners : []);
+        } catch (error) {
+          var failedKey = item.key;
+          setActionError({ key: failedKey, message: messageOf(error) });
+          logPluginError(runtimeCtx, "顶部运行操作失败（" + action + "）", error);
+          setTimeout(function () {
+            setActionError(function (current) {
+              return current !== null && current !== undefined && current.key === failedKey ? null : current;
+            });
+          }, 8000);
+        } finally {
+          setActionKey(null);
+        }
+      }
 
       // 状态轮询：当前项目有命令时显示这些命令；没有命令时显示所有项目正在运行的服务。
       react.useEffect(function () {
@@ -3120,6 +3170,9 @@ window.__ModuleLoader__.load({
             key: "cmd:" + command.id,
             title: String(command.title),
             projectPath: currentProjectPath,
+            commandId: command.id,
+            hasRunner: commandRunner !== undefined,
+            external: false,
             status: commandStatus,
             ports: Array.isArray(command.ports) ? command.ports : []
           });
@@ -3141,6 +3194,9 @@ window.__ModuleLoader__.load({
             key: runnerKey,
             title: typeof running.title === "string" && running.title !== "" ? running.title : String(running.commandId),
             projectPath: running.projectPath,
+            commandId: running.commandId,
+            hasRunner: true,
+            external: false,
             status: running.status,
             ports: Array.isArray(running.ports) ? running.ports : []
           });
@@ -3167,6 +3223,9 @@ window.__ModuleLoader__.load({
             key: entryKey,
             title: typeof entry.title === "string" && entry.title !== "" ? entry.title : String(entry.commandId),
             projectPath: entry.projectPath,
+            commandId: entry.commandId,
+            hasRunner: false,
+            external: true,
             status: "external",
             ports: [entry.port]
           });
@@ -3187,20 +3246,43 @@ window.__ModuleLoader__.load({
       },
         items.map(function (item) {
           var statusText = item.status === "external" ? "外部运行中" : runnerStatusText(item.status);
+          var itemError = actionError !== null && actionError !== undefined && actionError.key === item.key ? actionError.message : "";
           var projectLabel = shortProject(item.projectPath);
           var projectColor = projectColorOf(item.projectPath, uiStateCache !== null && uiStateCache !== undefined ? uiStateCache.projectColors : undefined);
+          var actions = headerActionsFor(item.status, item.hasRunner, item.external);
+          var itemBusy = actionKey === item.key;
           var tooltip = (projectLabel === "" ? "" : projectLabel + " · ") + item.title + " · " + statusText
-            + (item.ports.length > 0 ? " · 端口 " + item.ports.join("、") : "");
+            + (item.ports.length > 0 ? " · 端口 " + item.ports.join("、") : "")
+            + (itemError === "" ? "" : " · " + itemError);
+          function actionButton(action, label, title) {
+            return h("button", {
+              type: "button",
+              className: "dshRunnerHeaderBtn",
+              "data-action": action,
+              title: title,
+              disabled: itemBusy,
+              onClick: function (event) {
+                event.stopPropagation();
+                runHeaderAction(item, action);
+              }
+            }, itemBusy ? "…" : label);
+          }
           return h("span", {
             key: item.key,
             className: "dshRunnerHeaderChip",
             "data-status": item.status,
+            "data-busy": itemBusy ? "true" : "false",
             style: { background: projectColor.tint },
             title: tooltip
           },
             h("span", { className: "dshRunnerDot", "data-status": item.status, title: statusText }),
             h("span", { className: "dshRunnerHeaderName" }, item.title),
-            h("span", { className: "dshRunnerHeaderState", "data-status": item.status }, statusText));
+            h("span", { className: "dshRunnerHeaderState", "data-status": itemError === "" ? item.status : "failed" },
+              itemError === "" ? statusText : "失败"),
+            h("span", { className: "dshRunnerHeaderActions" },
+              actions.start ? actionButton("start", "▶", "启动") : null,
+              actions.stop ? actionButton("stop", "■", "停止") : null,
+              actions.restart ? actionButton("restart", "↻", "重启") : null));
         }));
     }
 
@@ -3511,6 +3593,7 @@ window.__ModuleLoader__.load({
       buildRunnerSections: buildRunnerSections,
       isProjectCollapsed: isProjectCollapsed,
       projectColorOf: projectColorOf,
+      headerActionsFor: headerActionsFor,
       toggleCollapsedProject: toggleCollapsedProject,
       occupantSummary: occupantSummary,
       formatProcessChain: formatProcessChain,

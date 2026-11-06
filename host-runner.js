@@ -1359,11 +1359,6 @@ export class ProjectRunnerService {
 
   async finish(record, status, exitCode, signal, note) {
     if (record === undefined || record === null || record.finished === true) return;
-    // 自然退出（命令自身失败/结束）时，子进程可能比根进程活得更久（典型：Tauri 的 beforeDevCommand/vite），
-    // 不清理会继续占着声明端口，导致下次启动 port-conflict 或看起来"没识别到"。
-    if (record.stopRequested !== true && (status === "failed" || status === "exited")) {
-      this.killRemainingDescendants(record);
-    }
     record.finished = true;
     record.status = status;
     record.exitCode = typeof exitCode === "number" ? exitCode : undefined;
@@ -1381,6 +1376,14 @@ export class ProjectRunnerService {
       }
     }
     await this.persist();
+    // 状态/落盘先定稿，再做残留清理（清理要查进程树，不能拖慢 stop/finish 的可见状态）。
+    if (record.stopRequested !== true && (status === "failed" || status === "exited")) {
+      try {
+        this.killRemainingDescendants(record);
+      } catch (error) {
+        this.reportError("清理残留子进程失败", error);
+      }
+    }
   }
 
   /** 自然退出后清理本次启动的残留子进程（只杀本次启动后创建的，避免 pid 复用误杀）。 */
