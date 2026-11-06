@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.21.0";
+    var PLUGIN_VERSION = "0.21.1";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -196,12 +196,10 @@ window.__ModuleLoader__.load({
       ".dshRunnerSectionIssue{font-size:10px;line-height:15px;color:#f59e0b;white-space:nowrap}",
       ".dshRunnerSectionEmpty{font-size:11px;line-height:16px;opacity:.55;padding:6px 8px}",
       ".dshRunnerGlobalSummary{font-size:10px;line-height:15px;opacity:.6;white-space:nowrap}",
-      ".dshRunnerHeaderFloat{position:fixed;transform:translate(-50%,-50%);z-index:9999;display:flex;align-items:center;justify-content:center;gap:4px;overflow:hidden;pointer-events:none}",
-      ".dshRunnerHeaderChip{pointer-events:auto}",
-      ".dshRunnerHeaderActions{display:none;align-items:center;gap:2px;flex:none}",
-      ".dshRunnerHeaderChip:hover .dshRunnerHeaderState,.dshRunnerHeaderChip:focus-within .dshRunnerHeaderState{display:none}",
-      ".dshRunnerHeaderChip:hover .dshRunnerHeaderActions,.dshRunnerHeaderChip:focus-within .dshRunnerHeaderActions{display:inline-flex}",
-      ".dshRunnerHeaderBtn{width:16px;height:16px;padding:0;border:none;border-radius:999px;background:rgba(128,128,128,.2);color:inherit;font-size:9px;line-height:16px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}",
+      ".dshRunnerHeaderFloat{position:fixed;transform:translate(-50%,-50%);z-index:9999;display:flex;align-items:center;justify-content:center;gap:4px;overflow:hidden;pointer-events:none;-webkit-app-region:no-drag}",
+      ".dshRunnerHeaderChip{pointer-events:auto;-webkit-app-region:no-drag}",
+      ".dshRunnerHeaderActions{display:inline-flex;align-items:center;gap:2px;flex:none;-webkit-app-region:no-drag}",
+      ".dshRunnerHeaderBtn{width:18px;height:18px;padding:0;border:none;border-radius:999px;background:rgba(128,128,128,.2);color:inherit;font-size:10px;line-height:18px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;-webkit-app-region:no-drag}",
       ".dshRunnerHeaderBtn:hover{background:rgba(128,128,128,.34)}",
       ".dshRunnerHeaderBtn:disabled{opacity:.45;cursor:default}",
       ".dshRunnerHeaderFloat .dshRunnerDot{margin-top:0;align-self:center}",
@@ -3251,6 +3249,7 @@ window.__ModuleLoader__.load({
           var projectColor = projectColorOf(item.projectPath, uiStateCache !== null && uiStateCache !== undefined ? uiStateCache.projectColors : undefined);
           var actions = headerActionsFor(item.status, item.hasRunner, item.external);
           var itemBusy = actionKey === item.key;
+          var hasActions = actions.start || actions.stop || actions.restart;
           var tooltip = (projectLabel === "" ? "" : projectLabel + " · ") + item.title + " · " + statusText
             + (item.ports.length > 0 ? " · 端口 " + item.ports.join("、") : "")
             + (itemError === "" ? "" : " · " + itemError);
@@ -3277,8 +3276,10 @@ window.__ModuleLoader__.load({
           },
             h("span", { className: "dshRunnerDot", "data-status": item.status, title: statusText }),
             h("span", { className: "dshRunnerHeaderName" }, item.title),
-            h("span", { className: "dshRunnerHeaderState", "data-status": itemError === "" ? item.status : "failed" },
-              itemError === "" ? statusText : "失败"),
+            hasActions && itemError === "" ? null : h("span", {
+              className: "dshRunnerHeaderState",
+              "data-status": itemError === "" ? item.status : "failed"
+            }, itemError === "" ? statusText : "失败"),
             h("span", { className: "dshRunnerHeaderActions" },
               actions.start ? actionButton("start", "▶", "启动") : null,
               actions.stop ? actionButton("stop", "■", "停止") : null,
