@@ -154,6 +154,13 @@ try {
   assert.deepEqual(savedUi.collapsedProjects, ["h:\\a", "h:\\b"], "折叠项目应规范化并去重");
   assert.equal(savedUi.collapsedGlobal, true);
   assert.deepEqual(await loadUiState(uiPath), savedUi, "UI 状态应可往返读取");
+  const savedColors = await saveUiState(uiPath, {
+    collapsedProjects: [],
+    collapsedGlobal: false,
+    projectColors: { "H:\\A": "rose", "h:/a/": "teal", "H:\\B": "bad color!" }
+  });
+  assert.deepEqual(savedColors.projectColors, { "h:\\a": "teal" }, "项目颜色应规范化、去重并丢弃非法值");
+  assert.deepEqual((await loadUiState(uiPath)).projectColors, { "h:\\a": "teal" }, "项目颜色应可往返读取");
   await writeFile(uiPath, "{broken", "utf8");
   assert.deepEqual(await loadUiState(uiPath), defaultUiState(), "损坏的 UI 状态应回到默认值");
   assert.deepEqual(normalizeUiState({ collapsedProjects: "x", collapsedGlobal: "yes" }), defaultUiState());

@@ -1,8 +1,8 @@
-// dsh-runner 0.19.0 的离线冒烟测试（CI 与本地都用它）。
+// dsh-runner 0.20.0 的离线冒烟测试（CI 与本地都用它）。
 //
 // 覆盖（SPEC 第 5 节 smoke 要求）：
 // 1. 用假的 window.__ModuleLoader__ / react / localStorage 执行 client.js，确认模块 id 与注入；
-// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.19.0）；
+// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.20.0）；
 // 3. slot 注册集合恰为 6 个：conversation.composer.dock / main / sidebar.panellist /
 //    settings.section / plugins.detail.badge / plugins.detail.section；
 // 4. __test 纯函数断言：stripAnsi / formatUptime / formatBytes / commandMatchesProject /
@@ -69,6 +69,7 @@ assert.deepEqual(
     "formatUptime",
     "isProjectCollapsed",
     "occupantSummary",
+    "projectColorOf",
     "runnerStatusText",
     "stripAnsi",
     "toggleCollapsedProject",
@@ -81,7 +82,7 @@ assert.deepEqual(
 const versionMatch = /var PLUGIN_VERSION = "([^"]+)";/.exec(source);
 assert.ok(versionMatch !== null, "client.js 必须有 PLUGIN_VERSION 常量");
 assert.equal(versionMatch[1], manifest.version, "PLUGIN_VERSION 必须与 package.json version 一致");
-assert.equal(manifest.version, "0.19.0", "目标版本是 0.19.0");
+assert.equal(manifest.version, "0.20.0", "目标版本是 0.20.0");
 
 // ---- 4. 纯函数断言 ----
 assert.equal(__test.stripAnsi("\u001b[31mred\u001b[0m"), "red");
@@ -202,6 +203,13 @@ assert.deepEqual(__test.toggleCollapsedProject([], "H:\\A"), ["h:\\a"]);
 assert.deepEqual(__test.toggleCollapsedProject(["h:\\a"], "H:\\A"), []);
 assert.deepEqual(__test.toggleCollapsedProject(["h:\\a"], "H:\\B"), ["h:\\a", "h:\\b"]);
 assert.deepEqual(__test.toggleCollapsedProject(["h:\\a"], ""), ["h:\\a"]);
+
+// 项目底色：同路径稳定、覆盖优先、非法覆盖回退自动
+const autoColor = __test.projectColorOf("H:\\A", {});
+assert.equal(__test.projectColorOf("h:/a/", {}).id, autoColor.id, "同一项目路径（不同写法）颜色必须一致");
+assert.equal(__test.projectColorOf("H:\\A", { "h:\\a": "rose" }).id, "rose", "用户覆盖优先");
+assert.equal(__test.projectColorOf("H:\\A", { "h:\\a": "no-such-color" }).id, autoColor.id, "非法覆盖回退自动色");
+assert.equal(typeof autoColor.tint, "string");
 assert.equal(__test.runnerStatusText("failed"), "启动失败");
 assert.equal(__test.runnerStatusText("idle"), "未运行");
 

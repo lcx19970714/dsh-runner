@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.19.0";
+    var PLUGIN_VERSION = "0.20.0";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -178,7 +178,14 @@ window.__ModuleLoader__.load({
       "@media (max-width:860px){.dshRunnerBody{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,auto) minmax(160px,1fr)}}",
       ".dshRunnerList{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:auto;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));border-radius:10px;background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.05))}",
       ".dshRunnerSection{display:flex;flex-direction:column;gap:2px;flex:none;margin-bottom:8px}",
-      ".dshRunnerSectionHead{display:flex;align-items:center;gap:8px;padding:4px 2px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28))}",
+      ".dshRunnerSectionHead{display:flex;align-items:center;gap:8px;padding:4px 8px;border:none;border-radius:8px}",
+      ".dshRunnerColorSwatch{flex:none;width:10px;height:10px;border-radius:50%;border:none;padding:0;cursor:pointer;opacity:.9}",
+      ".dshRunnerColorSwatch:hover{opacity:1}",
+      ".dshRunnerColorRow{display:flex;align-items:center;gap:5px;padding:2px 8px 6px;flex-wrap:wrap}",
+      ".dshRunnerColorChip{width:14px;height:14px;border-radius:50%;border:none;padding:0;cursor:pointer;opacity:.85}",
+      ".dshRunnerColorChip:hover{opacity:1;transform:scale(1.08)}",
+      ".dshRunnerColorAuto{font-size:10px;line-height:14px;padding:1px 6px;border-radius:999px;border:none;background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.16));color:inherit;opacity:.7;cursor:pointer}",
+      ".dshRunnerColorAuto:hover{opacity:1}",
       ".dshRunnerSectionInfo{display:flex;align-items:baseline;gap:6px;min-width:0;flex:1 1 auto}",
       ".dshRunnerSectionTitle{font-size:11px;font-weight:600;line-height:16px;white-space:nowrap}",
       ".dshRunnerSectionPath{font-size:10px;line-height:15px;opacity:.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1 1 auto;font-family:ui-monospace,Consolas,'Courier New',monospace}",
@@ -633,9 +640,20 @@ window.__ModuleLoader__.load({
     var uiStateLoadPromise = null;
 
     function normalizeUiSnapshot(state) {
+      var projectColors = {};
+      if (state !== null && state !== undefined && state.projectColors !== null
+        && typeof state.projectColors === "object" && !Array.isArray(state.projectColors)) {
+        for (var key in state.projectColors) {
+          if (!Object.prototype.hasOwnProperty.call(state.projectColors, key)) continue;
+          if (typeof state.projectColors[key] === "string" && state.projectColors[key] !== "") {
+            projectColors[normalizePath(key)] = state.projectColors[key];
+          }
+        }
+      }
       return {
         collapsedProjects: state !== null && state !== undefined && Array.isArray(state.collapsedProjects) ? state.collapsedProjects : [],
-        collapsedGlobal: state !== null && state !== undefined && state.collapsedGlobal === true
+        collapsedGlobal: state !== null && state !== undefined && state.collapsedGlobal === true,
+        projectColors: projectColors
       };
     }
 
@@ -752,6 +770,50 @@ window.__ModuleLoader__.load({
       }
       list.push(key);
       return list;
+    }
+
+    // 项目色板：按项目路径自动分配（稳定哈希），可在「运行」面板覆盖；覆盖值持久化在 Host ui-state。
+    var PROJECT_COLOR_PALETTE = [
+      { id: "blue", accent: "#3b82f6", tint: "rgba(59,130,246,.18)" },
+      { id: "cyan", accent: "#06b6d4", tint: "rgba(6,182,212,.18)" },
+      { id: "teal", accent: "#14b8a6", tint: "rgba(20,184,166,.18)" },
+      { id: "green", accent: "#22c55e", tint: "rgba(34,197,94,.16)" },
+      { id: "lime", accent: "#84cc16", tint: "rgba(132,204,22,.16)" },
+      { id: "amber", accent: "#f59e0b", tint: "rgba(245,158,11,.18)" },
+      { id: "orange", accent: "#f97316", tint: "rgba(249,115,22,.18)" },
+      { id: "rose", accent: "#f43f5e", tint: "rgba(244,63,94,.16)" },
+      { id: "pink", accent: "#ec4899", tint: "rgba(236,72,153,.16)" },
+      { id: "violet", accent: "#8b5cf6", tint: "rgba(139,92,246,.18)" },
+      { id: "indigo", accent: "#6366f1", tint: "rgba(99,102,241,.18)" },
+      { id: "slate", accent: "#64748b", tint: "rgba(100,116,139,.18)" }
+    ];
+
+    /** 稳定哈希：同一项目永远分配同一自动颜色。 */
+    function projectColorHash(text) {
+      var hash = 2166136261;
+      for (var i = 0; i < text.length; i += 1) {
+        hash ^= text.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      return hash >>> 0;
+    }
+
+    /** 项目颜色：用户覆盖优先，否则按路径哈希从色板取。 */
+    function projectColorOf(projectPath, projectColors) {
+      var key = normalizePath(projectPath);
+      if (projectColors !== null && projectColors !== undefined && typeof projectColors === "object"
+        && typeof projectColors[key] === "string" && projectColors[key] !== "") {
+        var overrideId = projectColors[key];
+        for (var i = 0; i < PROJECT_COLOR_PALETTE.length; i += 1) {
+          if (PROJECT_COLOR_PALETTE[i].id === overrideId) return PROJECT_COLOR_PALETTE[i];
+        }
+      }
+      if (key === "") return PROJECT_COLOR_PALETTE[0];
+      return PROJECT_COLOR_PALETTE[projectColorHash(key) % PROJECT_COLOR_PALETTE.length];
+    }
+
+    function projectColorPalette() {
+      return PROJECT_COLOR_PALETTE;
     }
 
     /**
@@ -1855,6 +1917,9 @@ window.__ModuleLoader__.load({
       var copiedPair = react.useState(false);
       var copied = copiedPair[0];
       var setCopied = copiedPair[1];
+      var colorPickerPair = react.useState(null);
+      var colorPicker = colorPickerPair[0];
+      var setColorPicker = colorPickerPair[1];
       var uiStatePair = react.useState(uiStateCache);
       var uiState = uiStatePair[0];
       var setUiState = uiStatePair[1];
@@ -1864,7 +1929,7 @@ window.__ModuleLoader__.load({
       var configReadyPair = react.useState(config !== null);
       var configReady = configReadyPair[0];
       var setConfigReady = configReadyPair[1];
-      var uiStateRef = react.useRef(uiStateCache !== null ? uiStateCache : { collapsedProjects: [], collapsedGlobal: false });
+      var uiStateRef = react.useRef(uiStateCache !== null ? uiStateCache : { collapsedProjects: [], collapsedGlobal: false, projectColors: {} });
       var uiSeqRef = react.useRef(0);
       function applyUiState(next) {
         var snapshot = storeUiState(next);
@@ -2009,12 +2074,14 @@ window.__ModuleLoader__.load({
         if (section.global === true) {
           next = {
             collapsedProjects: Array.isArray(previous.collapsedProjects) ? previous.collapsedProjects.slice() : [],
-            collapsedGlobal: previous.collapsedGlobal !== true
+            collapsedGlobal: previous.collapsedGlobal !== true,
+            projectColors: previous.projectColors !== undefined && previous.projectColors !== null ? previous.projectColors : {}
           };
         } else {
           next = {
             collapsedProjects: toggleCollapsedProject(previous.collapsedProjects, section.projectPath),
-            collapsedGlobal: previous.collapsedGlobal === true
+            collapsedGlobal: previous.collapsedGlobal === true,
+            projectColors: previous.projectColors !== undefined && previous.projectColors !== null ? previous.projectColors : {}
           };
         }
         // 连续快速点击不同分组时：同步更新 ref，后一次请求会把前一次的折叠一起带上；
@@ -2023,16 +2090,49 @@ window.__ModuleLoader__.load({
         try {
           var value = await rpc("ui/update", {
             collapsedProjects: next.collapsedProjects,
-            collapsedGlobal: next.collapsedGlobal
+            collapsedGlobal: next.collapsedGlobal,
+            projectColors: next.projectColors
           });
           if (uiSeqRef.current !== seq) return;
           var saved = value !== null && value !== undefined ? value.uiState : undefined;
           if (saved !== null && saved !== undefined) {
             applyUiState({
               collapsedProjects: Array.isArray(saved.collapsedProjects) ? saved.collapsedProjects : next.collapsedProjects,
-              collapsedGlobal: saved.collapsedGlobal === true
+              collapsedGlobal: saved.collapsedGlobal === true,
+              projectColors: saved.projectColors !== undefined && saved.projectColors !== null ? saved.projectColors : next.projectColors
             });
           }
+        } catch (uiError) {
+          if (uiSeqRef.current === seq) applyUiState(previous);
+          setError(uiError);
+        }
+      }
+
+      async function setProjectColor(projectPath, colorId) {
+        if (projectPath === undefined || projectPath === null || projectPath === "") return;
+        var seq = uiSeqRef.current + 1;
+        uiSeqRef.current = seq;
+        var previous = uiStateRef.current;
+        var previousColors = previous.projectColors !== undefined && previous.projectColors !== null ? previous.projectColors : {};
+        var nextColors = {};
+        for (var colorKey in previousColors) {
+          if (Object.prototype.hasOwnProperty.call(previousColors, colorKey)) nextColors[colorKey] = previousColors[colorKey];
+        }
+        var normalizedKey = normalizePath(projectPath);
+        if (colorId === null || colorId === undefined || colorId === "") delete nextColors[normalizedKey];
+        else nextColors[normalizedKey] = String(colorId);
+        var next = {
+          collapsedProjects: Array.isArray(previous.collapsedProjects) ? previous.collapsedProjects.slice() : [],
+          collapsedGlobal: previous.collapsedGlobal === true,
+          projectColors: nextColors
+        };
+        applyUiState(next);
+        setColorPicker(null);
+        try {
+          var value = await rpc("ui/update", { projectColors: nextColors });
+          if (uiSeqRef.current !== seq) return;
+          var saved = value !== null && value !== undefined ? value.uiState : undefined;
+          if (saved !== null && saved !== undefined) applyUiState(saved);
         } catch (uiError) {
           if (uiSeqRef.current === seq) applyUiState(previous);
           setError(uiError);
@@ -2593,6 +2693,7 @@ window.__ModuleLoader__.load({
         var isCurrent = section.global !== true && currentKey !== null
           && (normalizePath(section.projectPath) === currentKey
             || currentKey.indexOf(normalizePath(section.projectPath) + "\\") === 0);
+        var sectionColor = projectColorOf(section.projectPath, uiState !== null && uiState !== undefined ? uiState.projectColors : undefined);
         return h("div", {
           key: section.key,
           className: "dshRunnerSection",
@@ -2600,7 +2701,7 @@ window.__ModuleLoader__.load({
           "data-current": isCurrent ? "true" : "false",
           "data-collapsed": collapsed ? "true" : "false"
         },
-          h("div", { className: "dshRunnerSectionHead" },
+          h("div", { className: "dshRunnerSectionHead", style: { background: sectionColor.tint } },
             h("button", {
               type: "button",
               className: "dshRunnerSectionToggle",
@@ -2609,6 +2710,17 @@ window.__ModuleLoader__.load({
               title: collapsed ? "展开该工作区" : "折叠该工作区",
               onClick: function () { toggleSection(section); }
             }, collapsed ? "▸" : "▾"),
+            section.global === true ? null : h("button", {
+              type: "button",
+              className: "dshRunnerColorSwatch",
+              "data-action": "project-color",
+              title: "设置项目底色",
+              style: { background: sectionColor.accent },
+              onClick: function (event) {
+                event.stopPropagation();
+                setColorPicker(colorPicker === section.key ? null : section.key);
+              }
+            }),
             h("div", { className: "dshRunnerSectionInfo" },
               h("span", { className: "dshRunnerSectionTitle", title: section.projectPath === undefined ? "" : section.projectPath }, sectionTitle),
               isCurrent ? h("span", { className: "dshLimobTag" }, "当前") : null,
@@ -2632,6 +2744,23 @@ window.__ModuleLoader__.load({
                 disabled: busy !== null,
                 onClick: function () { runStopAll(section.projectPath); }
               }, "本组停止"))),
+          section.global === true || colorPicker !== section.key ? null : h("div", { className: "dshRunnerColorRow" },
+            projectColorPalette().map(function (color) {
+              return h("button", {
+                key: color.id,
+                type: "button",
+                className: "dshRunnerColorChip",
+                "data-color": color.id,
+                title: color.id,
+                style: { background: color.accent },
+                onClick: function () { setProjectColor(section.projectPath, color.id); }
+              });
+            }),
+            h("button", {
+              type: "button",
+              className: "dshRunnerColorAuto",
+              onClick: function () { setProjectColor(section.projectPath, null); }
+            }, "自动")),
           collapsed
             ? null
             : (rows.length === 0
@@ -2990,7 +3119,7 @@ window.__ModuleLoader__.load({
           items.push({
             key: "cmd:" + command.id,
             title: String(command.title),
-            project: "",
+            projectPath: currentProjectPath,
             status: commandStatus,
             ports: Array.isArray(command.ports) ? command.ports : []
           });
@@ -3011,7 +3140,7 @@ window.__ModuleLoader__.load({
           items.push({
             key: runnerKey,
             title: typeof running.title === "string" && running.title !== "" ? running.title : String(running.commandId),
-            project: shortProject(running.projectPath),
+            projectPath: running.projectPath,
             status: running.status,
             ports: Array.isArray(running.ports) ? running.ports : []
           });
@@ -3037,7 +3166,7 @@ window.__ModuleLoader__.load({
           items.push({
             key: entryKey,
             title: typeof entry.title === "string" && entry.title !== "" ? entry.title : String(entry.commandId),
-            project: shortProject(entry.projectPath),
+            projectPath: entry.projectPath,
             status: "external",
             ports: [entry.port]
           });
@@ -3058,16 +3187,18 @@ window.__ModuleLoader__.load({
       },
         items.map(function (item) {
           var statusText = item.status === "external" ? "外部运行中" : runnerStatusText(item.status);
-          var tooltip = (item.project === "" ? "" : item.project + " · ") + item.title + " · " + statusText
+          var projectLabel = shortProject(item.projectPath);
+          var projectColor = projectColorOf(item.projectPath, uiStateCache !== null && uiStateCache !== undefined ? uiStateCache.projectColors : undefined);
+          var tooltip = (projectLabel === "" ? "" : projectLabel + " · ") + item.title + " · " + statusText
             + (item.ports.length > 0 ? " · 端口 " + item.ports.join("、") : "");
           return h("span", {
             key: item.key,
             className: "dshRunnerHeaderChip",
             "data-status": item.status,
+            style: { background: projectColor.tint },
             title: tooltip
           },
             h("span", { className: "dshRunnerDot", "data-status": item.status, title: statusText }),
-            item.project === "" ? null : h("span", { className: "dshRunnerHeaderProject" }, item.project),
             h("span", { className: "dshRunnerHeaderName" }, item.title),
             h("span", { className: "dshRunnerHeaderState", "data-status": item.status }, statusText));
         }));
@@ -3379,6 +3510,7 @@ window.__ModuleLoader__.load({
       externalOccupancyForCommand: externalOccupancyForCommand,
       buildRunnerSections: buildRunnerSections,
       isProjectCollapsed: isProjectCollapsed,
+      projectColorOf: projectColorOf,
       toggleCollapsedProject: toggleCollapsedProject,
       occupantSummary: occupantSummary,
       formatProcessChain: formatProcessChain,

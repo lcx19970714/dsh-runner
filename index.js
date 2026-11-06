@@ -299,7 +299,8 @@ async function dispatch(runner, endpoint, payload, logger) {
     const next = {
       version: current.version,
       collapsedProjects: current.collapsedProjects.slice(),
-      collapsedGlobal: current.collapsedGlobal
+      collapsedGlobal: current.collapsedGlobal,
+      projectColors: Object.assign({}, current.projectColors)
     };
     if (data.collapsedProjects !== undefined) {
       if (!Array.isArray(data.collapsedProjects) || data.collapsedProjects.some((item) => typeof item !== "string")) {
@@ -312,6 +313,17 @@ async function dispatch(runner, endpoint, payload, logger) {
         throw new RpcError("bad-request", "ui/update 的 collapsedGlobal 必须是布尔值", {});
       }
       next.collapsedGlobal = data.collapsedGlobal;
+    }
+    if (data.projectColors !== undefined) {
+      if (!isPlainObject(data.projectColors)) {
+        throw new RpcError("bad-request", "ui/update 的 projectColors 必须是对象", {});
+      }
+      for (const [rawKey, rawValue] of Object.entries(data.projectColors)) {
+        if (typeof rawValue !== "string") {
+          throw new RpcError("bad-request", "ui/update 的 projectColors 值必须是字符串", { projectPath: rawKey });
+        }
+      }
+      next.projectColors = data.projectColors;
     }
     return { uiState: await saveUiState(UI_STATE_PATH, next) };
   }

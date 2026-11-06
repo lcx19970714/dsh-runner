@@ -6,11 +6,31 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { normalizePath } from "./host-config.js";
 
-export const UI_STATE_VERSION = 1;
+export const UI_STATE_VERSION = 2;
 
-/** 默认 UI 状态：全部展开。 */
+/** 默认 UI 状态：全部展开、项目色自动分配（无覆盖）。 */
 export function defaultUiState() {
-  return { version: UI_STATE_VERSION, collapsedProjects: [], collapsedGlobal: false };
+  return {
+    version: UI_STATE_VERSION,
+    collapsedProjects: [],
+    collapsedGlobal: false,
+    projectColors: {}
+  };
+}
+
+/** 项目颜色覆盖：只接受短标识（色板 id），键统一成规范路径。 */
+function normalizeProjectColors(raw) {
+  const colors = {};
+  if (raw === null || raw === undefined || typeof raw !== "object" || Array.isArray(raw)) return colors;
+  for (const [rawKey, rawValue] of Object.entries(raw)) {
+    if (typeof rawKey !== "string" || typeof rawValue !== "string") continue;
+    const key = normalizePath(rawKey);
+    const value = rawValue.trim();
+    if (key === "" || value === "" || value.length > 32) continue;
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) continue;
+    colors[key] = value;
+  }
+  return colors;
 }
 
 /** 归一化并去重折叠项目列表（路径统一成 host 的规范形式）。 */
@@ -28,6 +48,7 @@ export function normalizeUiState(raw) {
     }
   }
   if (typeof raw.collapsedGlobal === "boolean") state.collapsedGlobal = raw.collapsedGlobal;
+  state.projectColors = normalizeProjectColors(raw.projectColors);
   return state;
 }
 
