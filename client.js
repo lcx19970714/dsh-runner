@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.21.1";
+    var PLUGIN_VERSION = "0.22.0";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -742,7 +742,8 @@ window.__ModuleLoader__.load({
         var entry = entries[i];
         if (entry === null || entry === undefined) continue;
         if (entry.commandId !== commandId) continue;
-        if (entry.listening !== true) continue;
+        var processEntry = entry.kind === "process" && Array.isArray(entry.processes) && entry.processes.length > 0;
+        if (entry.listening !== true && !processEntry) continue;
         if (entry.occupant === null || entry.occupant === undefined) continue;
         if (entry.occupant.managed === true) continue;
         if (wantedPath !== null && typeof entry.projectPath === "string" && normalizePath(entry.projectPath) !== wantedPath) continue;
@@ -2568,6 +2569,7 @@ window.__ModuleLoader__.load({
         var current = row.runner !== undefined ? row.runner : findRowRunner(command, projectPath);
         var hasRunner = current !== null && current !== undefined;
         var external = externalOccupancyForCommand(diagnose, command.id, projectPath);
+        var externalIsProcess = external !== undefined && external.kind === "process";
         var status = hasRunner && typeof current.status === "string"
           ? current.status
           : (external !== undefined ? "external" : "idle");
@@ -2658,14 +2660,14 @@ window.__ModuleLoader__.load({
             h("button", {
               type: "button",
               className: "dshRunnerMiniBtn",
-              "data-action": !hasRunner && external !== undefined ? "kill-and-start" : "start",
-              disabled: rowBusy || disabled || active || !canStart,
+              "data-action": !hasRunner && external !== undefined && !externalIsProcess ? "kill-and-start" : "start",
+              disabled: rowBusy || disabled || active || !canStart || externalIsProcess,
               onClick: function (event) {
                 event.stopPropagation();
-                if (!hasRunner && external !== undefined) openExternalConflict(external, command.id, projectPath);
+                if (!hasRunner && external !== undefined && !externalIsProcess) openExternalConflict(external, command.id, projectPath);
                 else runAction("start", command.id, projectPath);
               }
-            }, !hasRunner && external !== undefined ? "结束并启动" : "启动"),
+            }, !hasRunner && external !== undefined && !externalIsProcess ? "结束并启动" : "启动"),
             h("button", {
               type: "button",
               className: "dshRunnerMiniBtn",
@@ -3176,8 +3178,27 @@ window.__ModuleLoader__.load({
           });
         }
       } else {
-        // 当前项目没有命令：显示所有项目正在运行的服务（托管 + 外部占用）。
-        var seen = {};
+        // 当前项目没有命令：按「命令身份」(projectPath + commandId) 合并为一个实例，
+        // 托管实例优先；同一身份不会再同时出现「运行中」和「外部运行中」。
+        var instances = {};
+        var orderedKeys = [];
+        function addInstance(projectPath, commandId, title, status, ports, managed) {
+          var identity = normalizePath(projectPath) + "\u0000" + commandId;
+          var existing = instances[identity];
+          if (existing !== undefined && existing.managed === true && managed !== true) return;
+          if (existing === undefined) orderedKeys.push(identity);
+          instances[identity] = {
+            key: identity,
+            title: title,
+            projectPath: projectPath,
+            commandId: commandId,
+            hasRunner: managed === true,
+            external: managed !== true,
+            status: status,
+            ports: ports,
+            managed: managed === true
+          };
+        }
         for (var runnerIndex = 0; runnerIndex < runners.length; runnerIndex += 1) {
           var running = runners[runnerIndex];
           if (running === null || running === undefined) continue;
@@ -3185,48 +3206,45 @@ window.__ModuleLoader__.load({
           var recentFailure = (running.status === "failed" || running.status === "exited")
             && typeof running.startedAt === "number" && Date.now() - running.startedAt < FAILED_CHIP_WINDOW_MS;
           if (!activeStatus && !recentFailure) continue;
-          var runnerKey = "run:" + normalizePath(running.projectPath) + ":" + running.commandId;
-          if (seen[runnerKey] === true) continue;
-          seen[runnerKey] = true;
-          items.push({
-            key: runnerKey,
-            title: typeof running.title === "string" && running.title !== "" ? running.title : String(running.commandId),
-            projectPath: running.projectPath,
-            commandId: running.commandId,
-            hasRunner: true,
-            external: false,
-            status: running.status,
-            ports: Array.isArray(running.ports) ? running.ports : []
-          });
+          addInstance(
+            running.projectPath,
+            running.commandId,
+            typeof running.title === "string" && running.title !== "" ? running.title : String(running.commandId),
+            running.status,
+            Array.isArray(running.ports) ? running.ports : [],
+            true
+          );
         }
         for (var entryIndex = 0; entryIndex < diagnoseEntries.length; entryIndex += 1) {
           var entry = diagnoseEntries[entryIndex];
-          if (entry === null || entry === undefined || entry.listening !== true) continue;
+          if (entry === null || entry === undefined) continue;
           if (entry.occupant === null || entry.occupant === undefined || entry.occupant.managed === true) continue;
-          var entryKey = "ext:" + normalizePath(entry.projectPath) + ":" + entry.commandId + ":" + String(entry.port);
-          if (seen[entryKey] === true) continue;
-          var managedSame = false;
-          for (var runIndex = 0; runIndex < runners.length; runIndex += 1) {
-            var candidate = runners[runIndex];
-            if (candidate !== null && candidate !== undefined && candidate.commandId === entry.commandId
-              && sameProject(candidate.projectPath, entry.projectPath)
-              && (candidate.status === "running" || candidate.status === "starting")) {
-              managedSame = true;
-              break;
-            }
+          var isProcessEntry = entry.kind === "process" && Array.isArray(entry.processes) && entry.processes.length > 0;
+          if (entry.listening !== true && !isProcessEntry) continue;
+          addInstance(
+            entry.projectPath,
+            entry.commandId,
+            typeof entry.title === "string" && entry.title !== "" ? entry.title : String(entry.commandId),
+            "external",
+            entry.listening === true ? [entry.port] : [],
+            false
+          );
+        }
+        items = orderedKeys.map(function (key) { return instances[key]; });
+        // 同名命令跨项目时，用项目短名消歧（只在冲突时出现，不增加常驻长度）。
+        var titleCounts = {};
+        for (var titleIndex = 0; titleIndex < items.length; titleIndex += 1) {
+          var titleKey = items[titleIndex].title;
+          titleCounts[titleKey] = (titleCounts[titleKey] || 0) + 1;
+        }
+        for (var labelIndex = 0; labelIndex < items.length; labelIndex += 1) {
+          var labelItem = items[labelIndex];
+          if (titleCounts[labelItem.title] > 1) {
+            var shortName = shortProject(labelItem.projectPath);
+            labelItem.label = shortName === "" ? labelItem.title : labelItem.title + " · " + shortName;
+          } else {
+            labelItem.label = labelItem.title;
           }
-          if (managedSame) continue;
-          seen[entryKey] = true;
-          items.push({
-            key: entryKey,
-            title: typeof entry.title === "string" && entry.title !== "" ? entry.title : String(entry.commandId),
-            projectPath: entry.projectPath,
-            commandId: entry.commandId,
-            hasRunner: false,
-            external: true,
-            status: "external",
-            ports: [entry.port]
-          });
         }
       }
 
@@ -3275,7 +3293,7 @@ window.__ModuleLoader__.load({
             title: tooltip
           },
             h("span", { className: "dshRunnerDot", "data-status": item.status, title: statusText }),
-            h("span", { className: "dshRunnerHeaderName" }, item.title),
+            h("span", { className: "dshRunnerHeaderName" }, item.label !== undefined ? item.label : item.title),
             hasActions && itemError === "" ? null : h("span", {
               className: "dshRunnerHeaderState",
               "data-status": itemError === "" ? item.status : "failed"

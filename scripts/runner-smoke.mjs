@@ -17,7 +17,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { ProjectRunnerService, RunnerError } from "../host-runner.js";
+import { ProjectRunnerService, RunnerError, attributeProjectProcesses } from "../host-runner.js";
 
 const SNAPSHOT_KEYS = [
   "commandId",
@@ -30,6 +30,7 @@ const SNAPSHOT_KEYS = [
   "status",
   "ready",
   "actualPorts",
+  "treePids",
   "exitCode",
   "pid",
   "startedAt",
@@ -111,6 +112,22 @@ function canConnectHost(host, port, timeoutMs = 400) {
 function canConnect(port, timeoutMs = 400) {
   return canConnectHost("127.0.0.1", port, timeoutMs);
 }
+
+// 纯函数：没有端口时把 cwd 下的可执行文件进程归属到命令（并排除托管进程树）
+const attributionCommands = [
+  { id: "c1", title: "客户端", scope: "project", projectRoot: "H:\\P1", cwd: "H:\\P1\\客户端", ports: [] },
+  { id: "c2", title: "其他", scope: "project", projectRoot: "H:\\P2", cwd: "H:\\P2", ports: [] },
+  { id: "g", title: "全局", scope: "global", ports: [] }
+];
+const attributionSnapshot = new Map([
+  [100, { name: "bd-client.exe", executablePath: "H:\\P1\\客户端\\target\\debug\\bd-client.exe", commandLine: "bd-client.exe", createdAt: "", parentPid: 1 }],
+  [101, { name: "node.exe", executablePath: "C:\\node\\node.exe", commandLine: "node H:\\P2\\x.js", createdAt: "", parentPid: 1 }],
+  [102, { name: "managed.exe", executablePath: "H:\\P1\\客户端\\target\\debug\\managed.exe", commandLine: "", createdAt: "", parentPid: 1 }]
+]);
+const attributionBuckets = attributeProjectProcesses(attributionCommands, attributionSnapshot, new Set([102]), undefined);
+assert.equal(attributionBuckets.length, 1, "只应归属到 cwd 下的命令，且排除托管进程");
+assert.equal(attributionBuckets[0].command.id, "c1");
+assert.deepEqual(attributionBuckets[0].processes.map((item) => item.pid), [100]);
 
 const dir = await mkdtemp(path.join(os.tmpdir(), "dsh-runner-smoke-"));
 const projectRoot = path.join(dir, "project");

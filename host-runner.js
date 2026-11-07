@@ -538,6 +538,59 @@ function orderCommandsByDependencies(selected, allCommands) {
   return order;
 }
 
+/**
+ * 把「可执行文件位于命令 cwd 之下」的进程归属到该命令。
+ * 用于识别没有声明端口、或根进程已退出但进程仍活的实例（例如 Tauri 客户端）。
+ * 最长 cwd 优先；已被托管进程树占用的 pid 不计入。
+ */
+export function attributeProjectProcesses(commands, snapshot, managedPids, scopedProjectPath) {
+  const targets = [];
+  for (const command of commands) {
+    if (command === null || typeof command !== "object") continue;
+    if (command.scope !== "project") continue;
+    const root = typeof command.projectRoot === "string" ? command.projectRoot.trim() : "";
+    const cwd = typeof command.cwd === "string" && command.cwd.trim() !== "" ? command.cwd.trim() : root;
+    if (root === "" || cwd === "") continue;
+    if (scopedProjectPath !== undefined && !commandMatchesProject(command, scopedProjectPath)) continue;
+    targets.push({
+      command: command,
+      projectPath: root,
+      cwdKey: normalizeProjectPath(cwd)
+    });
+  }
+  if (targets.length === 0) return [];
+  targets.sort((left, right) => right.cwdKey.length - left.cwdKey.length);
+  const buckets = new Map();
+  for (const [pid, info] of snapshot) {
+    if (pid === process.pid) continue;
+    if (managedPids !== null && managedPids !== undefined && managedPids.has(pid)) continue;
+    const exe = normalizeProjectPath(info.executablePath);
+    if (exe === "") continue;
+    let matched;
+    for (const target of targets) {
+      if (exe === target.cwdKey || exe.indexOf(target.cwdKey + "\\") === 0) {
+        matched = target;
+        break;
+      }
+    }
+    if (matched === undefined) continue;
+    const bucketKey = normalizeProjectPath(matched.projectPath) + "\u0000" + matched.command.id;
+    let bucket = buckets.get(bucketKey);
+    if (bucket === undefined) {
+      bucket = { command: matched.command, projectPath: matched.projectPath, processes: [] };
+      buckets.set(bucketKey, bucket);
+    }
+    bucket.processes.push({
+      pid: pid,
+      name: info.name,
+      executablePath: info.executablePath,
+      commandLine: info.commandLine,
+      createdAt: info.createdAt
+    });
+  }
+  return [...buckets.values()];
+}
+
 /** 一个项目路径下，一个命令最多一个进程；状态跨 Host 重启保留。 */
 export class ProjectRunnerService {
   constructor(options = {}) {
@@ -575,11 +628,13 @@ export class ProjectRunnerService {
       this.reportError("无法校验上次的后台进程，跳过接管", error);
       return;
     }
+    const dead = [];
     for (const entry of candidates) {
       const processInfo = table.get(entry.pid);
       const alive = processInfo !== undefined
         && (process.platform !== "win32" || processInfo.commandLine.indexOf(entry.marker) !== -1);
       if (!alive) {
+        dead.push(entry);
         if (processInfo === undefined) {
           await appendLogLine(entry.logPath, "\r\n[dsh-runner] 上次记录的后台进程已结束（Host 重启时发现）\r\n");
         }
@@ -610,8 +665,34 @@ export class ProjectRunnerService {
         stopRequested: false,
         adopted: true,
         child: null,
+        treePids: Array.isArray(entry.treePids) ? entry.treePids.filter((pid) => Number.isInteger(pid)) : [],
         finished: false
       });
+    }
+
+    // 根进程已死、但上次记录的进程树仍有存活子进程（Host 崩溃/被杀时常见）：
+    // 按 pid + 创建时间校验后清理，避免它们继续占端口、被误判成外部实例。
+    const withTree = dead.filter((entry) => Array.isArray(entry.treePids) && entry.treePids.length > 0);
+    if (withTree.length > 0) {
+      let snapshot;
+      try {
+        snapshot = queryProcessSnapshot();
+      } catch (error) {
+        this.reportError("无法读取进程表，跳过上次残留清理", error);
+      }
+      if (snapshot !== undefined) {
+        for (const entry of withTree) {
+          const startedAt = typeof entry.startedAt === "number" ? entry.startedAt : 0;
+          for (const pid of entry.treePids) {
+            if (!Number.isInteger(pid) || pid === process.pid) continue;
+            const info = snapshot.get(pid);
+            if (info === undefined) continue;
+            const created = typeof info.createdAt === "string" ? Date.parse(info.createdAt) : Number.NaN;
+            if (Number.isFinite(created) && startedAt > 0 && created + 2000 < startedAt) continue;
+            this.killProcess(pid, true);
+          }
+        }
+      }
     }
     await this.persist();
   }
@@ -650,10 +731,17 @@ export class ProjectRunnerService {
       this.reportError("无法刷新进程与端口状态", error);
       return;
     }
+    let treeChanged = false;
     for (const record of active) {
       const actual = treeListeningPorts(record.pid, tree, listeners).ports.sort((left, right) => left - right);
       record.actualPorts = actual;
+      const treePids = [...collectTreePids(record.pid, tree)].sort((left, right) => left - right);
+      if (JSON.stringify(Array.isArray(record.treePids) ? record.treePids : []) !== JSON.stringify(treePids)) {
+        record.treePids = treePids;
+        treeChanged = true;
+      }
     }
+    if (treeChanged) await this.persist();
 
     // 接管进程的存活校验（pid + 命令行标记）。
     const adopted = active.filter((record) => record.adopted === true && record.status === "running");
@@ -1112,13 +1200,24 @@ export class ProjectRunnerService {
 
   /** 端口诊断：项目内每条命令的每个 ports 端口一项，附带占用者完整信息与托管归属。 */
   /** 端口诊断：显式 projectPath 时只看该项目；省略时覆盖所有 project 作用域命令（按各自 projectRoot 标注）。 */
+  /**
+   * 运行实例诊断：
+   * - 每个命令最多返回一个「端口条目」，描述声明端口的监听者（托管/外部）；
+   * - 再为没有监听端口、但可执行文件位于命令 cwd 下的进程返回「进程条目」（kind="process"），
+   *   这样根进程已退出、端口已关闭但进程仍活的实例（如 Tauri 客户端）也能被识别。
+   */
   async diagnose(commands, projectPath) {
     await this.init();
     if (!Array.isArray(commands)) throw new RunnerError("bad-request", "diagnose 需要命令列表", {});
     const scopedProjectPath = typeof projectPath === "string" && projectPath.trim() !== "" ? projectPath.trim() : undefined;
-    const targets = [];
+    const portTargets = [];
+    const processCommands = [];
     for (const command of commands) {
       if (command === null || typeof command !== "object") continue;
+      if (command.scope === "project") {
+        if (scopedProjectPath !== undefined && !commandMatchesProject(command, scopedProjectPath)) continue;
+        processCommands.push(command);
+      }
       if (!Array.isArray(command.ports) || command.ports.length === 0) continue;
       let targetPath;
       if (command.scope === "project") {
@@ -1127,35 +1226,40 @@ export class ProjectRunnerService {
           if (root === "") continue;
           targetPath = root;
         } else {
-          if (!commandMatchesProject(command, scopedProjectPath)) continue;
           targetPath = scopedProjectPath;
         }
       } else {
-        // 全局命令只有落在具体项目上才有端口语义。
         if (scopedProjectPath === undefined) continue;
         targetPath = scopedProjectPath;
       }
-      targets.push({ command: command, projectPath: targetPath });
+      portTargets.push({ command: command, projectPath: targetPath });
     }
-    const ports = [];
-    for (const target of targets) {
-      for (const port of target.command.ports) {
-        if (Number.isInteger(port) && ports.indexOf(port) === -1) ports.push(port);
-      }
-    }
-    if (ports.length === 0) return [];
+
     const listeners = queryTcpListeners();
-    let snapshot = new Map();
-    if (ports.some((port) => listeners.byPort.has(port))) {
-      try {
-        snapshot = queryProcessSnapshot();
-      } catch (error) {
-        throw new RunnerError("internal", "无法读取进程表：" + messageOf(error), {});
-      }
+    let snapshot;
+    try {
+      snapshot = queryProcessSnapshot();
+    } catch (error) {
+      throw new RunnerError("internal", "无法读取进程表：" + messageOf(error), {});
     }
+    const managedPids = new Set();
+    try {
+      const tree = queryProcessTree();
+      for (const record of this.records.values()) {
+        if (!isActive(record) || typeof record.pid !== "number") continue;
+        for (const pid of collectTreePids(record.pid, tree)) managedPids.add(pid);
+      }
+    } catch (error) {
+      this.reportError("无法读取托管进程树，外部实例判定可能不完整", error);
+    }
+
     const entries = [];
-    for (const target of targets) {
+    const listeningIdentities = new Set();
+    const portIdentities = new Set();
+    for (const target of portTargets) {
       const command = target.command;
+      const identity = normalizeProjectPath(target.projectPath) + "\u0000" + command.id;
+      portIdentities.add(identity);
       for (const port of command.ports) {
         if (!Number.isInteger(port)) continue;
         const owners = listeners.byPort.get(port);
@@ -1180,9 +1284,31 @@ export class ProjectRunnerService {
             if (record !== undefined) occupant.runnerTitle = record.title;
           }
           entry.occupant = occupant;
+          listeningIdentities.add(identity);
         }
         entries.push(entry);
       }
+    }
+
+    for (const bucket of attributeProjectProcesses(processCommands, snapshot, managedPids, scopedProjectPath)) {
+      const identity = normalizeProjectPath(bucket.projectPath) + "\u0000" + bucket.command.id;
+      if (listeningIdentities.has(identity)) continue;
+      const hasManagedRunner = [...this.records.values()].some((record) => isActive(record)
+        && record.commandId === bucket.command.id && samePath(record.projectPath, bucket.projectPath));
+      if (hasManagedRunner) continue;
+      const first = bucket.processes[0];
+      const occupant = describeOccupant(first.pid, snapshot);
+      markOccupantRelated(occupant, bucket.projectPath, bucket.command.cwd);
+      occupant.managed = false;
+      entries.push({
+        commandId: bucket.command.id,
+        title: bucket.command.title,
+        projectPath: bucket.projectPath,
+        listening: false,
+        kind: "process",
+        processes: bucket.processes,
+        occupant: occupant
+      });
     }
     return entries;
   }
@@ -1442,6 +1568,7 @@ export class ProjectRunnerService {
       status: record.status,
       ready: record.ready === undefined ? null : record.ready,
       actualPorts: Array.isArray(record.actualPorts) ? record.actualPorts.slice() : [],
+      treePids: Array.isArray(record.treePids) ? record.treePids.slice() : [],
       exitCode: record.exitCode === undefined ? null : record.exitCode,
       pid: record.pid === undefined ? null : record.pid,
       startedAt: Number.isFinite(record.startedAt) ? record.startedAt : Date.now(),
