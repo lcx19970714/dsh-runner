@@ -42,12 +42,31 @@
   `runner.settle()`（只读内存状态）等结论，新增 `waitMs`（默认 120s）；UI 不等待。
 - **state 版本升到 3**：记录里多了 `error` / `external` / `pidCreatedAt`。
 
+### 复查补丁（同版本，未发布前修掉的隐患）
+
+- **spawn 与「停止」撞车**：`stop()` 先把状态改成 `stopping`（仍是 active），`terminate()` 可能在
+  `spawnRecord` 的某个 await 期间就把记录落成 `stopped`，随后旧代码会把状态写回 `starting`，
+  留下一个「状态是启动中、实际没人管」的孤儿进程。新增 `canSpawn()`（active && !stopRequested && !finished）
+  在每个 await 之后校验，撞车时直接收掉刚拉起的进程。
+- **依赖环死等**：环检测原来只在同步递归里，改成后台 flow 后两个 flow 会互相等对方落定（永久 queued）。
+  现在 `start()` 建记录**之前**做静态环检测（`findDependencyCycle`）直接报 `dependency-failed`；
+  依赖等待另外加了「预算 + 余量」的上界（`Promise.race`），对端 flow 卡死也能失败退出。
+- **未捕获的 Promise 拒绝**：`driveStart` 是 fire-and-forget，落账本身再失败会变成 unhandled rejection
+  （Node 22 默认致命，会带走整个 Host）。现在整条链路自带 catch。
+- **主动停止被改写成失败**：`failRecord` 现在尊重 `stopRequested`，取消的副作用按 `stopped` 收尾，
+  不会把用户点的「停止」显示成「启动失败」。
+- **会杀进程的决策路径全部改 fresh 采样**：Host 启动对账里的残留树清理、`assertPortsFree`、`killPort`、
+  `killRemainingDescendants` 之前还在吃 1–2s 的观测缓存，可能按过期 pid 判断归属。
+- **客户端**：`queued` 计入「活跃」（顶部 chip 会显示、快捷菜单不会重复启动）；顶部 chip 的动作不再多打一轮
+  `project/status`（响应里已带 runners）。
+
 ### 量化验收（scripts/runner-smoke.mjs 内置断言）
 
 - `start` 返回耗时 **< 300ms**（实测 2ms）；
 - 一条在启动时启动另一条，返回耗时 **< 300ms**（实测 ~20ms）；
 - 就绪等待期间 **事件循环延迟 p99 < 80ms**（实测 33ms；修复前是 300–400ms+）；
 - `startAll` 全部入队后立即返回；排队中取消不会拉起进程；端口冲突/降级/超时都以 `runner.error` 呈现。
+- 依赖环当场报错、不建记录；`start` 后立刻 `stop` 连续 3 轮不留野进程/端口；`canSpawn` 的三种失效条件有断言。
 
 ## 0.24.0
 

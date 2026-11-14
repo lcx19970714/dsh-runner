@@ -470,6 +470,21 @@ try {
   assert.equal(brokenChildFailed.error.details.commandId, "broken-dep");
   await runner.stop(projectRoot, "broken-dep").catch(() => {});
 
+  // 依赖环：必须在建记录前就失败，不能让两个 flow 互相死等
+  const cycleA = makeCommand({ id: "cycle-a", title: "环A", command: "Write-Output a", dependsOn: ["cycle-b"] });
+  const cycleB = makeCommand({ id: "cycle-b", title: "环B", command: "Write-Output b", dependsOn: ["cycle-a"] });
+  await assert.rejects(
+    () => runner.start(cycleA, projectRoot, { commands: [cycleA, cycleB] }),
+    (error) => {
+      assert.ok(error instanceof RunnerError);
+      assert.equal(error.code, "dependency-failed");
+      assert.match(error.message, /存在环/);
+      return true;
+    },
+    "dependsOn 有环必须当场拒绝"
+  );
+  assert.equal(runner.list(projectRoot).some((entry) => entry.commandId === "cycle-a"), false, "被环拒绝的命令不应留下记录");
+
   // startAll：按拓扑序全部入队，立即返回
   await runner.stopProject(projectRoot);
   const allCommands = [
@@ -735,6 +750,37 @@ try {
     p99 < EVENT_LOOP_P99_LIMIT_MS,
     "就绪等待期间事件循环延迟 p99 必须 < " + EVENT_LOOP_P99_LIMIT_MS + "ms（实测 " + Math.round(p99) + "ms）"
   );
+
+  // 启动与停止撞车：start 之后立刻 stop（重复几轮以覆盖 spawn 的 await 窗口），
+  // 不能留下「状态 starting、实际没人管」的野进程。
+  for (let round = 0; round < 3; round += 1) {
+    const [racePort] = await getFreePorts(1);
+    const raceId = "race-" + String(round);
+    const raceCommand = makeCommand({
+      id: raceId,
+      title: "启动即停止",
+      command: 'node "' + listenScript + '"',
+      env: { SMOKE_PORT: String(racePort) },
+      ports: [racePort],
+      readyPort: racePort,
+      readyTimeoutMs: 20000
+    });
+    await runner.start(raceCommand, projectRoot);
+    await runner.stop(projectRoot, raceId);
+    const raceRecord = await settle(runner, raceId, 20000);
+    assert.notEqual(raceRecord.status, "starting", "停止之后不能再回到 starting（第 " + String(round + 1) + " 轮）");
+    assert.notEqual(raceRecord.status, "running", "停止之后不能是 running（第 " + String(round + 1) + " 轮）");
+    await sleep(700);
+    assert.equal(await canConnect(racePort), false, "启动/停止撞车后不能留下占端口的进程（第 " + String(round + 1) + " 轮）");
+    if (typeof raceRecord.pid === "number" && raceRecord.pid > 0) {
+      await waitFor(() => pidAlive(raceRecord.pid) === false, 8000, "撞车后进程必须退出");
+    }
+  }
+
+  // canSpawn 的三个失效条件（状态机不变量，防止「已停止还能被写回 starting」的回归）
+  assert.equal(createRunner().canSpawn({ status: "queued", stopRequested: false, finished: false }), true, "排队中可以推进");
+  assert.equal(createRunner().canSpawn({ status: "queued", stopRequested: true, finished: false }), false, "已请求停止不能再 spawn");
+  assert.equal(createRunner().canSpawn({ status: "stopped", stopRequested: true, finished: true }), false, "已落定不能再 spawn");
 
   // 排队中取消：还没有 spawn 就被停掉，不能留下任何进程/端口
   const [cancelPort] = await getFreePorts(1);

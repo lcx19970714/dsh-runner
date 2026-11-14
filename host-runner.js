@@ -675,6 +675,39 @@ function isStateEntry(entry) {
     && typeof entry.logPath === "string" && entry.logPath !== "";
 }
 
+/**
+ * 静态依赖环检测：沿 dependsOn 走一遍配置图。
+ * 必须在建记录之前做——否则两个后台 flow 会互相等对方的 flow 落定，谁也不会先结束（死等）。
+ * 返回环上的 id 数组（含首尾重复）或 null。
+ */
+function findDependencyCycle(rootId, commands) {
+  const byId = new Map();
+  for (const item of Array.isArray(commands) ? commands : []) {
+    if (item !== null && typeof item === "object" && typeof item.id === "string") byId.set(item.id, item);
+  }
+  const state = new Map();
+  const stack = [];
+  const walk = (id) => {
+    if (state.get(id) === "done") return null;
+    if (state.get(id) === "visiting") {
+      const at = stack.indexOf(id);
+      return stack.slice(at < 0 ? 0 : at).concat([id]);
+    }
+    const command = byId.get(id);
+    if (command === undefined) return null;
+    state.set(id, "visiting");
+    stack.push(id);
+    for (const dependencyId of Array.isArray(command.dependsOn) ? command.dependsOn : []) {
+      const cycle = walk(dependencyId);
+      if (cycle !== null) return cycle;
+    }
+    stack.pop();
+    state.set(id, "done");
+    return null;
+  };
+  return walk(rootId);
+}
+
 /** 按 dependsOn 做拓扑排序（只排 selected 内部的依赖，selected 之外的由 start 递归处理）。 */
 function orderCommandsByDependencies(selected, allCommands) {
   const selectedIds = new Set(selected.map((command) => command.id));
@@ -847,7 +880,8 @@ export class ProjectRunnerService {
     if (withTree.length > 0) {
       let snapshot;
       try {
-        snapshot = await this.probe.snapshot();
+        // 这里会按 pid + 创建时间杀残留进程：必须新采样，不能吃缓存（会误杀复用后的 pid）。
+        snapshot = await this.probe.snapshotFresh();
       } catch (error) {
         this.reportError("无法读取进程表，跳过上次残留清理", error);
       }
@@ -963,6 +997,12 @@ export class ProjectRunnerService {
     }
     await this.init();
     const workspace = projectPath.trim();
+    const commands = Array.isArray(options.commands) ? options.commands : [];
+    // 依赖环必须在建记录前拒绝：两个 flow 互相等对方落定就是永久死等。
+    const cycle = findDependencyCycle(command.id, commands);
+    if (cycle !== null) {
+      throw new RunnerError("dependency-failed", "dependsOn 存在环：" + cycle.join(" -> "), { commandId: command.id });
+    }
     const key = this.key(workspace, command.id);
     const existing = this.records.get(key);
     if (isActive(existing)) return this.snapshot(existing);
@@ -970,7 +1010,7 @@ export class ProjectRunnerService {
     const record = this.createQueuedRecord(command, workspace);
     this.records.set(key, record);
     await this.persist();
-    this.driveStart(record, command, Array.isArray(options.commands) ? options.commands : []);
+    this.driveStart(record, command, commands);
     return this.snapshot(record);
   }
 
@@ -1015,8 +1055,17 @@ export class ProjectRunnerService {
    */
   driveStart(record, command, commands) {
     if (record.flow !== null && record.flow !== undefined) return record.flow;
-    const flow = this.runStartFlow(record, command, commands)
-      .catch((error) => this.failRecord(record, error))
+    const flow = (async () => {
+      try {
+        await this.runStartFlow(record, command, commands);
+      } catch (error) {
+        // 启动流程的任何失败都落成记录状态，绝不外抛。
+        await this.failRecord(record, error);
+      }
+    })()
+      // 兜底：连「落账」本身都失败时（磁盘/日志异常）也不能变成未捕获拒绝——
+      // 未处理的 Promise 拒绝在 Node 22 默认是致命错误，会带走整个 Host。
+      .catch((error) => { this.reportError("启动流程异常（已落盘为失败状态）", error); })
       .finally(() => { record.flow = null; });
     record.flow = flow;
     return flow;
@@ -1068,7 +1117,11 @@ export class ProjectRunnerService {
         throw new RunnerError("dependency-failed", "依赖「" + dependency.title + "」没有建立运行记录", { commandId: dependency.id });
       }
       const flow = record.flow;
-      if (flow !== null && flow !== undefined) await flow;
+      if (flow !== null && flow !== undefined) {
+        // 上界 = 依赖自己的就绪预算 + 余量：对端 flow 卡死时这里必须能失败退出。
+        const budget = (Number.isInteger(record.readyTimeoutMs) ? record.readyTimeoutMs : DEFAULT_READY_TIMEOUT_MS) + 5000;
+        await Promise.race([flow, sleep(budget)]);
+      }
       if (record.status !== "running") {
         const failure = record.error !== null && record.error !== undefined ? record.error : null;
         throw new RunnerError(
@@ -1087,23 +1140,33 @@ export class ProjectRunnerService {
    * 端口预检 + spawn。返回 false 表示记录在排队/预检期间被取消（不再 spawn）。
    * 预检/工作目录/spawn 失败抛 RunnerError，由 driveStart 落成 record.error。
    */
+  /**
+   * 还能不能把这次启动继续推进下去。
+   * 注意不能只看 isActive：stop() 会先把状态改成 stopping（仍是 active），
+   * 而 terminate() 可能在 spawn 的某个 await 期间已经把记录落成 stopped。
+   */
+  canSpawn(record) {
+    return isActive(record) && record.stopRequested !== true && record.finished !== true;
+  }
+
   async spawnRecord(record, command) {
-    if (!isActive(record)) return false;
+    if (!this.canSpawn(record)) return false;
     try {
       await access(record.cwd);
     } catch (error) {
       throw new RunnerError("spawn-failed", "工作目录不存在：" + record.cwd, { cwd: record.cwd });
     }
     await this.assertPortsFree(command);
-    if (!isActive(record)) return false;
+    if (!this.canSpawn(record)) return false;
 
     await mkdir(path.dirname(record.logPath), { recursive: true });
     const logHandle = await openFile(record.logPath, "a");
     let child;
     try {
       await logHandle.write("\r\n[dsh-runner] " + new Date().toLocaleString() + " 启动：" + record.title + "（" + record.projectPath + "）\r\n");
-      if (!isActive(record)) return false;
+      if (!this.canSpawn(record)) return false;
       const shell = await resolvePowerShell();
+      if (!this.canSpawn(record)) return false;
       const env = Object.assign({}, process.env, isPlainObject(command.env) ? command.env : {});
       child = spawn(shell, ["-NoLogo", "-NoProfile", "-Command", buildCommandText(command, record.cwd, record.marker)], {
         cwd: record.cwd,
@@ -1119,6 +1182,13 @@ export class ProjectRunnerService {
     }
 
     record.pid = typeof child.pid === "number" ? child.pid : null;
+    if (!this.canSpawn(record)) {
+      // spawn 和「停止」撞车：记录已经落成 stopped/失败，不能再写回 starting，
+      // 否则会留下一个状态是 starting、实际没人管的孤儿进程。
+      await this.killProcess(record.pid, true);
+      await this.finishIfActive(record, "启动过程中被取消，已结束本次进程");
+      return false;
+    }
     record.status = "starting";
     record.error = null;
     record.child = child;
@@ -1139,11 +1209,6 @@ export class ProjectRunnerService {
       void this.finish(record, status, exitCode, signal === undefined || signal === null ? undefined : signal);
     });
     await this.persist();
-    if (!isActive(record)) {
-      // spawn 期间被点了「停止」：不留一个不受管的进程。
-      await this.killProcess(record.pid, true);
-      return false;
-    }
     return true;
   }
 
@@ -1198,6 +1263,11 @@ export class ProjectRunnerService {
     if (record === undefined || record === null) return null;
     const code = error instanceof RunnerError ? error.code : "internal";
     const message = messageOf(error);
+    // 用户在这期间点了「停止」：这次失败只是取消的副作用，按 stopped 收尾，不要标成启动失败。
+    if (record.stopRequested === true && record.error === null) {
+      await this.finishIfActive(record, "启动已取消：" + message);
+      return this.snapshot(record);
+    }
     record.error = {
       code: code,
       message: message,
@@ -1346,7 +1416,7 @@ export class ProjectRunnerService {
     if (occupiedPorts.length === 0) return;
     let snapshot;
     try {
-      snapshot = await this.probe.snapshot();
+      snapshot = await this.probe.snapshotFresh();
     } catch (error) {
       throw new RunnerError(
         "internal",
@@ -1463,6 +1533,13 @@ export class ProjectRunnerService {
         && command.scope === "project"
         && commandMatchesProject(command, workspace);
     });
+    // 先整体做一次环检测：配置有环就整体拒绝，不要留下「启动了一半」的现场。
+    for (const command of selected) {
+      const cycle = findDependencyCycle(command.id, commands);
+      if (cycle !== null) {
+        throw new RunnerError("dependency-failed", "dependsOn 存在环：" + cycle.join(" -> "), { commandId: command.id });
+      }
+    }
     const order = orderCommandsByDependencies(selected, commands);
     const queued = [];
     for (const command of order) {
@@ -1606,7 +1683,7 @@ export class ProjectRunnerService {
     const pid = [...owners][0];
     let snapshot;
     try {
-      snapshot = await this.probe.snapshot();
+      snapshot = await this.probe.snapshotFresh();
     } catch (error) {
       throw new RunnerError("internal", "无法读取进程表：" + messageOf(error), { port: port });
     }
@@ -2058,8 +2135,9 @@ export class ProjectRunnerService {
     let tree;
     let snapshot;
     try {
-      tree = await this.probe.tree();
-      snapshot = await this.probe.snapshot();
+      // 这一段按 pid + 创建时间杀进程：必须新采样。
+      tree = await this.probe.treeFresh();
+      snapshot = await this.probe.snapshotFresh();
     } catch (error) {
       this.reportError("无法读取进程树，跳过残留子进程清理", error);
       return;

@@ -3386,9 +3386,9 @@ window.__ModuleLoader__.load({
         setActionKey(item.key);
         setActionError(null);
         try {
-          await rpc("project/" + action, { projectPath: item.projectPath, commandId: item.commandId });
-          var value = await rpc("project/status", {});
-          setRunners(value !== null && value !== undefined && Array.isArray(value.runners) ? value.runners : []);
+          // 动作响应已带回最新 runners，不再额外发一轮 status。
+          var value = await rpc("project/" + action, { projectPath: item.projectPath, commandId: item.commandId });
+          if (value !== null && value !== undefined && Array.isArray(value.runners)) setRunners(value.runners);
         } catch (error) {
           var failedKey = item.key;
           setActionError({ key: failedKey, message: messageOf(error) });
@@ -3598,7 +3598,8 @@ window.__ModuleLoader__.load({
         for (var runnerIndex = 0; runnerIndex < runners.length; runnerIndex += 1) {
           var running = runners[runnerIndex];
           if (running === null || running === undefined) continue;
-          var activeStatus = running.status === "running" || running.status === "starting" || running.status === "stopping";
+          var activeStatus = running.status === "queued" || running.status === "running"
+            || running.status === "starting" || running.status === "stopping";
           var recentFailure = (running.status === "failed" || running.status === "exited")
             && typeof running.startedAt === "number" && Date.now() - running.startedAt < FAILED_CHIP_WINDOW_MS;
           if (!activeStatus && !recentFailure) continue;
@@ -3895,7 +3896,8 @@ window.__ModuleLoader__.load({
       function renderMenuRow(command) {
         var current = runnerByCommand[command.id];
         var rowStatus = current !== null && current !== undefined && typeof current.status === "string" ? current.status : "idle";
-        var rowActive = rowStatus === "starting" || rowStatus === "running" || rowStatus === "stopping";
+        var rowActive = rowStatus === "queued" || rowStatus === "starting"
+          || rowStatus === "running" || rowStatus === "stopping";
         return h("div", { key: command.id, className: "dshLimobRunRow" },
           h("span", { className: "dshLimobRunRowMain" },
             h("span", { className: "dshLimobRunItemTitle" }, command.title),
