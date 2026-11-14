@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.25.1
+
+### Fixed（启用失败：Cannot find package '@deepseek-ai/dsh-client-connection'）
+
+现象：DSH 0.2.2-rc.3 桌面版里插件行 `dsh-runner` 一直 `inactive`，弹窗报
+`ERR_MODULE_NOT_FOUND: Cannot find package '@deepseek-ai/dsh-client-connection' imported from ...\plugins\dsh-runner\index.js`。
+
+根因不是代码，是**模块解析**：`index.js` 从 `0.6.0` 起就 import 了 `@deepseek-ai/dsh-client-connection` 和
+`@deepseek-ai/dsh-tools`，这两个包只在 DSH 安装目录里（`app.asar` 内），插件目录本身没有 `node_modules`。
+0.2.2 起 Host 走「profile 解析层」：插件如果是本地 `link:` 安装（目录在 profile 之外），
+只有**插件自己 `package.json` 的 `peerDependencies` 里列出的包名**才会被重定向到 DSH 安装目录
+（`dsh-app-boot` 的 `routeLinked` 只读 `peerDependencies` 的 key，`dependencies` / `devDependencies` 都不算），
+没列出的走 Node 原生解析 → 找不到。
+
+修复：`package.json` 声明这两项 peer 依赖（DSH 安装自带的同名包由宿主解析，`autoInstallPeers: false` 下不会重复安装）。
+从 npm 正常安装的插件不受影响（profile 层对安装来源的包名全量拦截），本地 link 开发才会踩到。
+
 ## 0.25.0
 
 ### Fixed（点一下运行，整机卡住）
