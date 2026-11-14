@@ -1,8 +1,8 @@
-// dsh-runner 0.24.0 的离线冒烟测试（CI 与本地都用它）。
+// dsh-runner 0.25.0 的离线冒烟测试（CI 与本地都用它）。
 //
 // 覆盖（SPEC 第 5 节 smoke 要求）：
 // 1. 用假的 window.__ModuleLoader__ / react / localStorage 执行 client.js，确认模块 id 与注入；
-// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.24.0）；
+// 2. client.js 的 PLUGIN_VERSION 与 package.json version 一致（0.25.0）；
 // 3. slot 注册集合恰为 6 个：conversation.composer.dock / main / sidebar.panellist /
 //    settings.section / plugins.detail.badge / plugins.detail.section；
 // 4. __test 纯函数断言：stripAnsi / formatUptime / formatBytes / commandMatchesProject /
@@ -84,7 +84,7 @@ assert.deepEqual(
 const versionMatch = /var PLUGIN_VERSION = "([^"]+)";/.exec(source);
 assert.ok(versionMatch !== null, "client.js 必须有 PLUGIN_VERSION 常量");
 assert.equal(versionMatch[1], manifest.version, "PLUGIN_VERSION 必须与 package.json version 一致");
-assert.equal(manifest.version, "0.24.0", "目标版本是 0.24.0");
+assert.equal(manifest.version, "0.25.0", "目标版本是 0.25.0");
 
 // ---- 4. 纯函数断言 ----
 assert.equal(__test.stripAnsi("\u001b[31mred\u001b[0m"), "red");
@@ -220,8 +220,10 @@ assert.deepEqual(__test.headerActionsFor("idle", false, false), { start: true, s
 assert.deepEqual(__test.headerActionsFor("failed", false, false), { start: true, stop: false, restart: false });
 assert.deepEqual(__test.headerActionsFor("stopping", true, false), { start: false, stop: false, restart: false });
 assert.deepEqual(__test.headerActionsFor("external", false, true), { start: false, stop: false, restart: false });
+assert.deepEqual(__test.headerActionsFor("queued", true, false), { start: false, stop: true, restart: false }, "排队中：可以停止（取消启动）");
 assert.equal(__test.runnerStatusText("failed"), "启动失败");
 assert.equal(__test.runnerStatusText("idle"), "未运行");
+assert.equal(__test.runnerStatusText("queued"), "排队中");
 
 // 行内动作（0.24.0）：外部运行中 -> 接管 + 重启；已接管 -> 停止 + 重启；其余按状态
 const externalRow = __test.rowActionsFor({ status: "external", hasRunner: false, external: true, canAct: true });
@@ -250,6 +252,11 @@ assert.deepEqual(
   __test.rowActionsFor({ status: "running", hasRunner: true, external: true, canAct: true }),
   { adopt: false, start: false, stop: true, restart: true, label: "启动" },
   "已接管的外部实例：停止 + 重启"
+);
+assert.deepEqual(
+  __test.rowActionsFor({ status: "queued", hasRunner: true, external: false, canAct: true }),
+  { adopt: false, start: false, stop: true, restart: false, label: "启动" },
+  "排队中：只能停止（取消启动），不能重复启动/重启"
 );
 // 接管记录带来的新字段（external/pidCreatedAt）必须出现在 __test 契约之外、runner 快照里；
 // 这里只断言常量集合，避免字段改名后 bug 静默：见 runner-smoke 的 SNAPSHOT_KEYS。

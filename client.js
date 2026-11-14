@@ -43,7 +43,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.24.0";
+    var PLUGIN_VERSION = "0.25.0";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -224,6 +224,7 @@ window.__ModuleLoader__.load({
       ".dshRunnerHeaderProject{opacity:.55;flex:none;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
       ".dshRunnerHeaderState{opacity:.65;flex:none;white-space:nowrap}",
       ".dshRunnerHeaderState[data-status=running]{color:#22c55e;opacity:1}",
+      ".dshRunnerHeaderState[data-status=queued]{color:#94a3b8;opacity:1}",
       ".dshRunnerHeaderState[data-status=starting],.dshRunnerHeaderState[data-status=stopping]{color:#f59e0b;opacity:1}",
       ".dshRunnerHeaderState[data-status=failed],.dshRunnerHeaderState[data-status=exited]{color:#f87171;opacity:1}",
       ".dshRunnerRow{display:flex;align-items:flex-start;gap:7px;padding:8px 10px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.22));min-width:0;cursor:pointer}",
@@ -232,6 +233,7 @@ window.__ModuleLoader__.load({
       ".dshRunnerRow[data-selected=true]{background:rgba(103,158,254,.12)}",
       ".dshRunnerRow[data-disabled=true]{opacity:.55}",
       ".dshRunnerDot{width:7px;height:7px;border-radius:50%;margin-top:6px;flex:none;background:rgba(128,128,128,.6)}",
+      ".dshRunnerDot[data-status=queued]{background:#94a3b8}",
       ".dshRunnerDot[data-status=starting]{background:#f59e0b}",
       ".dshRunnerDot[data-status=external]{background:#f59e0b;box-shadow:0 0 0 2px rgba(245,158,11,.25)}",
       ".dshRunnerDot[data-status=running]{background:#22c55e}",
@@ -243,6 +245,7 @@ window.__ModuleLoader__.load({
       ".dshRunnerRowTitleText{font-size:12px;font-weight:500;line-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}",
       ".dshRunnerStateText{font-size:10px;line-height:14px;opacity:.65;flex:none;white-space:nowrap}",
       ".dshRunnerStateText[data-status=running]{color:#22c55e;opacity:1}",
+      ".dshRunnerStateText[data-status=queued]{color:#94a3b8;opacity:1}",
       ".dshRunnerStateText[data-status=starting],.dshRunnerStateText[data-status=stopping]{color:#f59e0b;opacity:1}",
       ".dshRunnerStateText[data-status=external]{color:#f59e0b;opacity:1}",
       ".dshRunnerStateText[data-status=failed],.dshRunnerStateText[data-status=exited]{color:#f87171;opacity:1}",
@@ -878,6 +881,7 @@ window.__ModuleLoader__.load({
      */
     function headerActionsFor(status, hasRunner, external) {
       if (external === true) return { start: false, stop: false, restart: false };
+      if (status === "queued") return { start: false, stop: true, restart: false };
       if (status === "running" || status === "starting") {
         return { start: false, stop: true, restart: hasRunner === true };
       }
@@ -898,7 +902,7 @@ window.__ModuleLoader__.load({
       var canAct = options !== null && options !== undefined && options.canAct !== false;
       var disabled = options !== null && options !== undefined && options.disabled === true;
       var canStart = canAct && options !== null && options !== undefined && options.runnerOnly !== true;
-      var active = status === "starting" || status === "running" || status === "stopping";
+      var active = status === "queued" || status === "starting" || status === "running" || status === "stopping";
       var needsHost = !hasRunner && external;
       if (disabled) return { adopt: false, start: false, stop: false, restart: false, label: "启动" };
       if (needsHost) {
@@ -914,9 +918,9 @@ window.__ModuleLoader__.load({
       return {
         adopt: false,
         start: canStart && !active,
-        // 停止中不再给「停止」：重复触发只会打断状态机，等它落定即可。
-        stop: canAct && hasRunner && (status === "running" || status === "starting"),
-        restart: canStart && status !== "stopping",
+        // 排队中/启动中/运行中都能停；停止中不再给「停止」（重复触发只会打断状态机）。
+        stop: canAct && hasRunner && (status === "running" || status === "starting" || status === "queued"),
+        restart: canStart && status !== "stopping" && status !== "queued",
         label: "启动"
       };
     }
@@ -973,6 +977,7 @@ window.__ModuleLoader__.load({
 
     function runnerStatusText(status) {
       if (status === "external") return "外部运行中";
+      if (status === "queued") return "排队中";
       if (status === "starting") return "启动中";
       if (status === "running") return "运行中";
       if (status === "stopping") return "停止中";
@@ -2013,9 +2018,16 @@ window.__ModuleLoader__.load({
       var errorPair = react.useState(null);
       var error = errorPair[0];
       var setError = errorPair[1];
-      var busyPair = react.useState(null);
-      var busy = busyPair[0];
-      var setBusy = busyPair[1];
+      // 并发模型（0.25.0）：
+      //   pending  —— 按命令（projectPath+commandId）记「这一行正在请求中」，只禁用这一行；
+      //   flow     —— 面板级长流程（刷新 / 本组启动 / 本组停止 / 清空日志），只禁用面板级按钮。
+      // 旧的单一 busy 会把所有行一起锁死，点「运行后端」时前端/官网都点不动。
+      var pendingPair = react.useState({});
+      var pending = pendingPair[0];
+      var setPending = pendingPair[1];
+      var flowPair = react.useState(null);
+      var flow = flowPair[0];
+      var setFlow = flowPair[1];
       var conflictPair = react.useState(null);
       var conflict = conflictPair[0];
       var setConflict = conflictPair[1];
@@ -2191,6 +2203,48 @@ window.__ModuleLoader__.load({
         };
       }, []);
 
+      // 运行期失败是「状态」而不是异常：Host 把它落在 runner.error 上，这里按类型呈现。
+      // 端口类（port-conflict / port-mismatch）直接打开原来的端口冲突对话框，其它进错误条；
+      // 用 code+message 做签名去重，同一个错误不会每 2s 弹一次。
+      var surfacedErrorsRef = react.useRef({});
+      react.useEffect(function () {
+        var seen = {};
+        var conflictToShow = null;
+        var firstFailure = null;
+        for (var runnerIndex = 0; runnerIndex < runners.length; runnerIndex += 1) {
+          var runner = runners[runnerIndex];
+          if (runner === null || runner === undefined || typeof runner.commandId !== "string") continue;
+          var failure = runner.error === null || runner.error === undefined ? null : runner.error;
+          if (failure === null) continue;
+          var runnerKey = compositeKey(runner.projectPath === undefined ? "" : runner.projectPath, runner.commandId);
+          var signature = String(failure.code) + "|" + String(failure.message);
+          seen[runnerKey] = signature;
+          if (surfacedErrorsRef.current[runnerKey] === signature) continue;
+          var details = failure.details === null || failure.details === undefined ? {} : failure.details;
+          if ((failure.code === "port-conflict" || failure.code === "port-mismatch") && Array.isArray(details.ports)) {
+            if (conflictToShow === null) conflictToShow = { runner: runner, failure: failure, details: details };
+          } else if (firstFailure === null) {
+            firstFailure = failure;
+          }
+        }
+        surfacedErrorsRef.current = seen;
+        if (conflictToShow !== null) {
+          setConflict({
+            projectPath: conflictToShow.runner.projectPath,
+            commandId: conflictToShow.runner.commandId,
+            action: "start",
+            kind: conflictToShow.failure.code,
+            ports: conflictToShow.details.ports,
+            processes: [],
+            actualPorts: Array.isArray(conflictToShow.details.actualPorts) ? conflictToShow.details.actualPorts : []
+          });
+          return;
+        }
+        if (firstFailure !== null) {
+          setError(rpcError(String(firstFailure.code), String(firstFailure.message), firstFailure.details));
+        }
+      }, [runners]);
+
       // 选中的命令：每 1000ms 轮询 project/log（maxBytes 65536）。
       react.useEffect(function () {
         if (selected === null || selected === undefined) {
@@ -2320,9 +2374,29 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /** 按命令维度加/清「这一行正在请求中」的标记（只锁这一行）。 */
+      function setRowPending(projectPath, commandId, value) {
+        var rowKey = compositeKey(projectPath === undefined ? "" : projectPath, commandId);
+        setPending(function (current) {
+          var next = Object.assign({}, current === null || current === undefined ? {} : current);
+          if (value === true) next[rowKey] = true;
+          else delete next[rowKey];
+          return next;
+        });
+      }
+
+      function isRowPending(projectPath, commandId) {
+        return pending[compositeKey(projectPath === undefined ? "" : projectPath, commandId)] === true;
+      }
+
+      /** RPC 已经带回最新的 runners 列表，直接用，不再额外发一轮 status 请求。 */
+      function applyRunners(value) {
+        if (value !== null && value !== undefined && Array.isArray(value.runners)) setRunners(value.runners);
+      }
+
       async function refresh() {
-        if (busy !== null) return;
-        setBusy("__refresh__");
+        if (flow !== null) return;
+        setFlow("refresh");
         setError(null);
         try {
           await loadConfig();
@@ -2331,37 +2405,30 @@ window.__ModuleLoader__.load({
         } catch (refreshError) {
           setError(refreshError);
         } finally {
-          setBusy(null);
+          setFlow(null);
         }
       }
 
+      /**
+       * 行内动作：start / stop / restart。
+       * Host 的 start 是「命令即返回」（实测 < 30ms），所以这里 await 的只是一次短请求；
+       * queued -> starting -> running 的状态推进由 2s 状态轮询画出来，不需要在这里等。
+       * 运行期失败不再走 catch：它落在 runner.error 上，由下面的错误观察 effect 统一呈现。
+       */
       async function runAction(action, commandId, projectPath) {
-        if (busy !== null || projectPath === undefined || projectPath === null || projectPath === "") return;
-        setBusy(commandId);
+        if (projectPath === undefined || projectPath === null || projectPath === "") return;
+        if (isRowPending(projectPath, commandId)) return;
+        setRowPending(projectPath, commandId, true);
         setError(null);
         try {
           var endpoint = action === "start" ? "project/start" : action === "stop" ? "project/stop" : "project/restart";
-          await rpc(endpoint, { projectPath: projectPath, commandId: commandId });
-          await refreshStatus();
+          var value = await rpc(endpoint, { projectPath: projectPath, commandId: commandId });
+          applyRunners(value);
           if (action !== "stop") setSelected({ projectPath: projectPath, commandId: commandId });
-          await refreshDiagnose();
         } catch (actionError) {
-          if (isPortBlockingError(actionError)) {
-            setError(null);
-            setConflict({
-              projectPath: projectPath,
-              commandId: commandId,
-              action: action,
-              kind: actionError.code,
-              ports: actionError.details.ports,
-              actualPorts: Array.isArray(actionError.details.actualPorts) ? actionError.details.actualPorts : []
-            });
-            refreshDiagnose();
-          } else {
-            setError(actionError);
-          }
+          setError(actionError);
         } finally {
-          setBusy(null);
+          setRowPending(projectPath, commandId, false);
         }
       }
 
@@ -2370,100 +2437,66 @@ window.__ModuleLoader__.load({
        * 外部进程的 stdout 回放不了，日志区会明确说明；要实时日志就点「重启」。
        */
       async function runAdopt(commandId, projectPath, entry) {
-        if (busy !== null || projectPath === undefined || projectPath === null || projectPath === "") return;
-        setBusy(commandId);
+        if (projectPath === undefined || projectPath === null || projectPath === "") return;
+        if (isRowPending(projectPath, commandId)) return;
+        setRowPending(projectPath, commandId, true);
         setError(null);
         try {
           var occupantPid = entry !== null && entry !== undefined && entry.occupant !== null && entry.occupant !== undefined
             && typeof entry.occupant.pid === "number" ? entry.occupant.pid : undefined;
           var value = await rpc("project/adopt", { projectPath: projectPath, commandId: commandId, pid: occupantPid });
-          await refreshStatus();
+          applyRunners(value);
           if (value !== null && value !== undefined && value.adopted === true) {
             setSelected({ projectPath: projectPath, commandId: commandId });
           }
-          await refreshDiagnose();
         } catch (adoptError) {
           setError(adoptError);
         } finally {
-          setBusy(null);
+          setRowPending(projectPath, commandId, false);
         }
       }
 
       /** 解除接管：只把实例移出托管，不结束进程（点错接管时用）。 */
       async function releaseAdopted(projectPath, commandId) {
-        if (busy !== null) return;
-        setBusy(commandId);
+        if (isRowPending(projectPath, commandId)) return;
+        setRowPending(projectPath, commandId, true);
         setError(null);
         try {
-          await rpc("project/release", { projectPath: projectPath, commandId: commandId });
-          await refreshStatus();
-          await refreshDiagnose();
+          var value = await rpc("project/release", { projectPath: projectPath, commandId: commandId });
+          applyRunners(value);
         } catch (releaseError) {
           setError(releaseError);
         } finally {
-          setBusy(null);
+          setRowPending(projectPath, commandId, false);
         }
       }
 
+      /** 本组启动：Host 按拓扑序全部入队后立即返回，界面马上变成一堆「排队中」。 */
       async function runStartAll(projectPath) {
-        if (busy !== null || projectPath === undefined || projectPath === null || projectPath === "") return;
-        setBusy("__startAll__");
+        if (projectPath === undefined || projectPath === null || projectPath === "" || flow !== null) return;
+        setFlow("startAll");
         setError(null);
         try {
           var value = await rpc("project/startAll", { projectPath: projectPath });
-          await refreshStatus();
-          var failed = value !== null && value !== undefined && Array.isArray(value.failed) ? value.failed : [];
-          var conflictFailure = null;
-          for (var failedIndex = 0; failedIndex < failed.length; failedIndex += 1) {
-            var failedItem = failed[failedIndex];
-            if (failedItem !== null && failedItem !== undefined
-              && (failedItem.code === "port-conflict" || failedItem.code === "port-mismatch")
-              && failedItem.details !== null && failedItem.details !== undefined && Array.isArray(failedItem.details.ports)) {
-              conflictFailure = failedItem;
-              break;
-            }
-          }
-          if (conflictFailure !== null) {
-            setError(null);
-            setConflict({
-              projectPath: projectPath,
-              commandId: conflictFailure.commandId,
-              action: "startAll",
-              kind: conflictFailure.code,
-              ports: conflictFailure.details.ports,
-              actualPorts: Array.isArray(conflictFailure.details.actualPorts) ? conflictFailure.details.actualPorts : []
-            });
-          } else if (failed.length > 0) {
-            var first = failed[0] !== null && failed[0] !== undefined ? failed[0] : {};
-            var label = typeof first.title === "string" && first.title !== "" ? first.title : String(first.commandId);
-            var failure = rpcError(
-              typeof first.code === "string" ? first.code : "start-failed",
-              "启动失败：" + label + " — " + String(first.message === undefined || first.message === null ? "未知原因" : first.message)
-                + (failed.length > 1 ? "（共 " + failed.length + " 条命令启动失败）" : ""),
-              first.details
-            );
-            setError(failure);
-          }
-          await refreshDiagnose();
+          applyRunners(value);
         } catch (startAllError) {
           setError(startAllError);
         } finally {
-          setBusy(null);
+          setFlow(null);
         }
       }
 
       async function runStopAll(projectPath) {
-        if (busy !== null || projectPath === undefined || projectPath === null || projectPath === "") return;
-        setBusy("__stopAll__");
+        if (projectPath === undefined || projectPath === null || projectPath === "" || flow !== null) return;
+        setFlow("stopAll");
         setError(null);
         try {
-          await rpc("project/stopAll", { projectPath: projectPath });
-          await refreshStatus();
-          await refreshDiagnose();
+          var value = await rpc("project/stopAll", { projectPath: projectPath });
+          applyRunners(value);
         } catch (stopAllError) {
           setError(stopAllError);
         } finally {
-          setBusy(null);
+          setFlow(null);
         }
       }
 
@@ -2490,8 +2523,8 @@ window.__ModuleLoader__.load({
       }
 
       async function clearLog() {
-        if (selected === null || selected === undefined || busy !== null) return;
-        setBusy("__log_clear__");
+        if (selected === null || selected === undefined || flow !== null) return;
+        setFlow("logClear");
         setError(null);
         try {
           await rpc("project/log/clear", { projectPath: selected.projectPath, commandId: selected.commandId });
@@ -2508,7 +2541,7 @@ window.__ModuleLoader__.load({
         } catch (clearError) {
           setError(clearError);
         } finally {
-          setBusy(null);
+          setFlow(null);
         }
       }
 
@@ -2535,10 +2568,9 @@ window.__ModuleLoader__.load({
         try {
           // 「重启并接管」：Host 自己结束外部实例（端口占用者 + 归属该命令的进程），再按托管方式启动。
           if (conflict.takeOver === true) {
-            await rpc("project/restart", { projectPath: projectPath, commandId: conflict.commandId, takeOver: true });
-            await refreshStatus();
+            var takenOver = await rpc("project/restart", { projectPath: projectPath, commandId: conflict.commandId, takeOver: true });
+            applyRunners(takenOver);
             setSelected({ projectPath: projectPath, commandId: conflict.commandId });
-            await refreshDiagnose();
             setConflict(null);
             return;
           }
@@ -2558,44 +2590,16 @@ window.__ModuleLoader__.load({
             }
           }
           if (conflict.action === "startAll") {
+            // 本组启动现在是「全部入队」：重新入队即可；单条命令的失败会以 runner.error 呈现。
             var all = await rpc("project/startAll", { projectPath: projectPath });
-            await refreshStatus();
-            var failed = all !== null && all !== undefined && Array.isArray(all.failed) ? all.failed : [];
-            var nextConflict = null;
-            for (var failedIndex = 0; failedIndex < failed.length; failedIndex += 1) {
-              var failedItem = failed[failedIndex];
-              if (failedItem !== null && failedItem !== undefined
-                && (failedItem.code === "port-conflict" || failedItem.code === "port-mismatch")
-                && failedItem.details !== null && failedItem.details !== undefined && Array.isArray(failedItem.details.ports)) {
-                nextConflict = failedItem;
-                break;
-              }
-            }
-            await refreshDiagnose();
-            if (nextConflict !== null) {
-              setConflict({
-                projectPath: projectPath,
-                commandId: nextConflict.commandId,
-                action: "startAll",
-                kind: nextConflict.code,
-                ports: nextConflict.details.ports,
-                actualPorts: Array.isArray(nextConflict.details.actualPorts) ? nextConflict.details.actualPorts : []
-              });
-              setConflictError(rpcError("port-conflict", String(nextConflict.message), nextConflict.details));
-              return;
-            }
-            if (failed.length > 0) {
-              var first = failed[0];
-              setError(rpcError("start-failed", "启动失败：" + String(first.message), first.details));
-            }
+            applyRunners(all);
             setConflict(null);
             return;
           }
           var endpoint = conflict.action === "restart" ? "project/restart" : "project/start";
-          await rpc(endpoint, { projectPath: projectPath, commandId: conflict.commandId });
-          await refreshStatus();
+          var retried = await rpc(endpoint, { projectPath: projectPath, commandId: conflict.commandId });
+          applyRunners(retried);
           setSelected({ projectPath: projectPath, commandId: conflict.commandId });
-          await refreshDiagnose();
           setConflict(null);
         } catch (actionError) {
           if (isPortBlockingError(actionError)) {
@@ -2611,7 +2615,6 @@ window.__ModuleLoader__.load({
           } else {
             setConflictError(actionError);
           }
-          refreshDiagnose();
         } finally {
           setConflictBusy(false);
         }
@@ -2782,7 +2785,7 @@ window.__ModuleLoader__.load({
           ? current.status
           : (external !== undefined ? "external" : "idle");
         var disabled = command.enabled === false;
-        var rowBusy = busy !== null;
+        var rowBusy = isRowPending(projectPath, command.id);
         var canAct = projectPath !== undefined && projectPath !== null && projectPath !== "";
         var declaredPorts = Array.isArray(command.ports) ? command.ports : [];
         var actualPorts = current !== null && current !== undefined && Array.isArray(current.actualPorts)
@@ -2988,14 +2991,14 @@ window.__ModuleLoader__.load({
                 type: "button",
                 className: "dshRunnerMiniBtn",
                 "data-action": "start-all",
-                disabled: busy !== null,
+                disabled: flow !== null,
                 onClick: function () { runStartAll(section.projectPath); }
               }, "本组启动"),
               h("button", {
                 type: "button",
                 className: "dshRunnerMiniBtn",
                 "data-action": "stop-all",
-                disabled: busy !== null,
+                disabled: flow !== null,
                 onClick: function () { runStopAll(section.projectPath); }
               }, "本组停止"))),
           section.global === true || colorPicker !== section.key ? null : h("div", { className: "dshRunnerColorRow" },
@@ -3055,14 +3058,14 @@ window.__ModuleLoader__.load({
             type: "button",
             className: "dshRunnerMiniBtn",
             "data-action": "release-takeover",
-            disabled: busy !== null,
+            disabled: selected === null || selected === undefined || isRowPending(selectedProjectPath, selected.commandId),
             title: "不结束进程，只把这条命令移出托管；之后它重新显示为「外部运行中」",
             onClick: function () { releaseAdopted(selectedProjectPath, selected.commandId); }
           }, "取消接管") : null,
           h("button", {
             type: "button",
             className: "dshRunnerMiniBtn",
-            disabled: selected === null || selected === undefined || busy !== null,
+            disabled: selected === null || selected === undefined || flow !== null,
             onClick: clearLog
           }, "清空日志"),
           h("button", {
@@ -3199,9 +3202,9 @@ window.__ModuleLoader__.load({
             h("button", {
               type: "button",
               className: "dshLimobCfgBtn",
-              disabled: busy !== null,
+              disabled: flow !== null,
               onClick: refresh
-            }, busy === "__refresh__" ? "刷新中…" : "刷新"),
+            }, flow === "refresh" ? "刷新中…" : "刷新"),
             h("button", {
               type: "button",
               className: "dshLimobCfgBtn dshLimobCfgBtnPrimary",
@@ -3871,7 +3874,7 @@ window.__ModuleLoader__.load({
           var endpoint = action === "start" ? "project/start" : action === "stop" ? "project/stop" : "project/restart";
           var value = await rpc(endpoint, { projectPath: projectPath, commandId: command.id });
           if (value !== null && value !== undefined && Array.isArray(value.runners)) setRunners(value.runners);
-          setStatus({ phase: action === "stop" ? "idle" : "running", text: "已" + label + "：" + command.title });
+          setStatus({ phase: action === "stop" ? "idle" : "running", text: action === "stop" ? "已停止：" + command.title : "已提交：" + command.title });
         } catch (actionError) {
           setStatus({ phase: "error", text: label + "失败：" + messageOf(actionError) });
         } finally {

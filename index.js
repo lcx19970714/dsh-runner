@@ -241,6 +241,15 @@ function jsonSafe(value) {
   return JSON.parse(JSON.stringify(value === undefined ? null : value));
 }
 
+/** Tool 侧「等结论」的默认时长与上限：Host 的 start 立刻返回，等待由 Tool 自己轮询完成。 */
+const DEFAULT_TOOL_WAIT_MS = 120000;
+const MAX_TOOL_WAIT_MS = 1800000;
+
+function resolveWaitMs(value) {
+  if (!Number.isInteger(value)) return DEFAULT_TOOL_WAIT_MS;
+  return Math.min(Math.max(1000, value), MAX_TOOL_WAIT_MS);
+}
+
 /** 把内部错误映射成 RPC 结构化错误（未知错误一律 internal）。 */
 function toRpcError(error) {
   if (error instanceof RpcError) return error;
@@ -367,14 +376,12 @@ async function dispatch(runner, endpoint, payload, logger) {
     const loaded = await loadHostConfig(logger);
     const command = findRunnableCommand(loaded.config, commandId);
     assertCommandProject(command, projectPath);
-    await runner.refresh();
     const started = await runner.start(command, projectPath, { commands: loaded.config.commands });
     return { runner: started, runners: runner.list(projectPath) };
   }
   if (endpoint === "project/stop") {
     const projectPath = requireProjectPath(data);
     const commandId = requireCommandId(data);
-    await runner.refresh();
     const stopped = await runner.stop(projectPath, commandId);
     return { stopped: stopped, runners: runner.list(projectPath) };
   }
@@ -384,7 +391,6 @@ async function dispatch(runner, endpoint, payload, logger) {
     const loaded = await loadHostConfig(logger);
     const command = findRunnableCommand(loaded.config, commandId);
     assertCommandProject(command, projectPath);
-    await runner.refresh();
     const restarted = await runner.restart(command, projectPath, {
       commands: loaded.config.commands,
       // 外部运行中的实例：确认后先结束外部进程，再按托管方式启动（之后才有实时日志）。
@@ -396,11 +402,10 @@ async function dispatch(runner, endpoint, payload, logger) {
     const projectPath = requireProjectPath(data);
     const loaded = await loadHostConfig(logger);
     const result = await runner.startAll(loaded.config.commands, projectPath);
-    return { started: result.started, failed: result.failed, runners: result.runners };
+    return { queued: result.queued, runners: result.runners };
   }
   if (endpoint === "project/stopAll") {
     const projectPath = requireProjectPath(data);
-    await runner.refresh();
     const stopped = await runner.stopProject(projectPath);
     return { stopped: stopped, runners: runner.list(projectPath) };
   }
@@ -623,7 +628,9 @@ function registerRunTool(ctx, runner, logger) {
     description:
       "Start/stop/inspect long-running project services managed by dsh-runner. "
       + "action=status shows the project's runners; start/stop/restart operate one command; "
-      + "startAll starts every enabled project-scope command in dependency order; stopAll stops them all; "
+      + "startAll queues every enabled project-scope command in dependency order; stopAll stops them all; "
+      + "start/restart/startAll wait (bounded by waitMs) until the commands settle and report {ok,status,error}; "
+      + "status/stopping states are reported on the runner record, so failures surface as runner.error rather than exceptions; "
       + "diagnose reports TCP ports occupied by non-managed processes (process name/PID/window title/parent chain); "
       + "adopt takes over an externally running instance of a command (it appears in the run panel and can then be stopped/restarted; "
       + "its stdout cannot be replayed, so use restart to relaunch it under management and get live logs); "
@@ -646,6 +653,7 @@ function registerRunTool(ctx, runner, logger) {
       port: { type: "integer", description: "killPort only: TCP port whose non-managed occupant should be ended." },
       pid: { type: "integer", description: "killPort/adopt only: expected occupant pid from diagnose; rejects if the port/instance changed hands." },
       takeOver: { type: "boolean", description: "restart only: end the command's external instances first, then start it managed (default false)." },
+      waitMs: { type: "integer", description: "start/restart/startAll only: how long to wait for the commands to settle (default 120000, max 1800000). The Host returns immediately; this Tool polls until the command is running or failed." },
       maxBytes: { type: "integer", description: "log only: max bytes of the tail to read (1024-1048576), default 65536." }
     },
     output: {
@@ -669,29 +677,40 @@ function registerRunTool(ctx, runner, logger) {
         const loaded = await loadHostConfig(logger);
         const command = findRunnableCommand(loaded.config, commandId);
         assertCommandProject(command, projectPath);
-        await runner.refresh();
-        const runnerSnapshot = args.action === "start"
+        const queued = args.action === "start"
           ? await runner.start(command, projectPath, { commands: loaded.config.commands })
           : await runner.restart(command, projectPath, {
             commands: loaded.config.commands,
             takeOverExternal: args.takeOver === true
           });
-        return { runner: runnerSnapshot, runners: runner.list(projectPath) };
+        // Host 的 start 是「命令即返回」；AI 需要结论，所以由 Tool 轮询内存状态等它落定。
+        const settled = await runner.settle(projectPath, commandId, resolveWaitMs(args.waitMs));
+        const final = settled === null ? queued : settled;
+        return {
+          ok: final.status === "running",
+          status: final.status,
+          error: final.error,
+          runner: final,
+          runners: runner.list(projectPath)
+        };
       }
       if (args.action === "stop") {
         const commandId = typeof args.commandId === "string" ? args.commandId.trim() : "";
         if (commandId === "") throw new Error("stop 需要 commandId");
-        await runner.refresh();
         const stopped = await runner.stop(projectPath, commandId);
         return { stopped: stopped, runners: runner.list(projectPath) };
       }
       if (args.action === "startAll") {
         const loaded = await loadHostConfig(logger);
         const result = await runner.startAll(loaded.config.commands, projectPath);
-        return { started: result.started, failed: result.failed, runners: result.runners };
+        const waitMs = resolveWaitMs(args.waitMs);
+        const settled = await Promise.all(result.queued.map((commandId) => runner.settle(projectPath, commandId, waitMs)));
+        const failures = settled
+          .filter((item) => item !== null && item.status !== "running")
+          .map((item) => ({ commandId: item.commandId, title: item.title, status: item.status, error: item.error }));
+        return { queued: result.queued, runners: runner.list(projectPath), failures: failures };
       }
       if (args.action === "stopAll") {
-        await runner.refresh();
         const stopped = await runner.stopProject(projectPath);
         return { stopped: stopped, runners: runner.list(projectPath) };
       }
@@ -714,7 +733,6 @@ function registerRunTool(ctx, runner, logger) {
       if (args.action === "adopt" || args.action === "release") {
         const commandId = typeof args.commandId === "string" ? args.commandId.trim() : "";
         if (commandId === "") throw new Error(args.action + " 需要 commandId");
-        await runner.refresh();
         if (args.action === "release") {
           const released = await runner.release(projectPath, commandId);
           return { released: released, runners: runner.list(projectPath) };

@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.25.0
+
+### Fixed（点一下运行，整机卡住）
+
+根因有三层，全部从第一性原理重做，没有保留兼容分支：
+
+1. **Host 在事件循环上做同步进程探测**：5 处 `spawnSync`（`netstat` / `Get-CimInstance` 进程树 / 全表快照 /
+   进程表 / `taskkill`）。实测一次全表快照 **370–422ms**、进程树 ~330ms、netstat 29ms，
+   而 Host 同时服务整个 GUI（会话、终端、所有面板的 RPC），所以卡的不是面板，是整个应用。
+   → 全部换成 `execFile` 异步（`runCommand`），并引入 **SystemProbe**：TTL 缓存（500ms/1s）+ 单飞
+   （同类并发只采样一次）。进程/端口查询从此只有一个入口，主线程永不被阻塞。
+2. **start 是「等到就绪才返回」的 RPC**：端口契约等待（后端 120s、客户端 300s）绑在 HTTP 请求生命周期里，
+   请求不返回状态就不更新；而这期间的 150ms 就绪轮询每轮都要 netstat + 整表 CIM 查询 →
+   启动期间事件循环 **≈100% 被占**。
+   → start / restart / startAll 改成 **命令即返回**：建立 `queued` 记录后立即返回（实测 2–21ms），
+   依赖解析、端口预检、spawn、端口契约等待全部放进后台 **flow**；同一命令全局只有一个 flow（去重）。
+3. **运行期失败只能靠 RPC 抛异常**：状态查询看不到失败原因。
+   → 失败统一落成 **`record.error {code,message,details}`** + `status:"failed"`；RPC 只对参数/配置错误抛。
+   UI 从状态轮询里读错误：端口类自动打开原来的端口冲突对话框，其它进错误条（按 code+message 去重，
+   不会每 2s 弹一次）。
+
+### Added（并发交互）
+
+- **行内并发**：客户端把单一全局 `busy` 换成 **按命令的 pending**（`projectPath+commandId`）+ 面板级 `flow`。
+  点「运行后端」只锁后端这一行，前端/官网/客户端可以同时点，互不等待。
+- **排队中（queued）状态**：依赖未就绪或刚开始时显示「排队中」，可以点「停止」取消启动
+  （flow 在检查点退出，不会把进程拉起来）。
+- **动作 RPC 直接带回最新 runners**：动作后不再额外发 `project/status` + `project/diagnose`，
+  少两轮扫描、反馈也是即时的。
+- **本组启动变成全部入队**：按拓扑序一次性排队，单条失败不阻塞其它（失败以 runner.error 呈现）。
+- **停止全部并行**：`stopProject` 用 `Promise.all`，不再 N 条命令耗时相加。
+
+### 关键设计约束（写进代码注释，防止回退）
+
+- **缓存只用于观测，不用于决策**：`assertPortsFree` / `waitPortsFree` / `externalInstances` / `killPort` /
+  `adopt` 一律走 `probe.*Fresh()`（绕过缓存重新采样 + 作废在飞采样）。
+  这一条是踩出来的：接管一个「刚起来」的外部实例时，500ms 前的 netstat 缓存让 Host 以为「没人在听」，
+  于是没杀进程就直接启动 → 子进程 EADDRINUSE 退出（这次的回归测试覆盖了它）。
+- **AI Tool 的同步语义由 Tool 自己补**：`dsh_runner_run start/restart/startAll` 在 Host 侧轮询
+  `runner.settle()`（只读内存状态）等结论，新增 `waitMs`（默认 120s）；UI 不等待。
+- **state 版本升到 3**：记录里多了 `error` / `external` / `pidCreatedAt`。
+
+### 量化验收（scripts/runner-smoke.mjs 内置断言）
+
+- `start` 返回耗时 **< 300ms**（实测 2ms）；
+- 一条在启动时启动另一条，返回耗时 **< 300ms**（实测 ~20ms）；
+- 就绪等待期间 **事件循环延迟 p99 < 80ms**（实测 33ms；修复前是 300–400ms+）；
+- `startAll` 全部入队后立即返回；排队中取消不会拉起进程；端口冲突/降级/超时都以 `runner.error` 呈现。
+
 ## 0.24.0
 
 ### Added（外部运行中的实例：接管 / 重启）

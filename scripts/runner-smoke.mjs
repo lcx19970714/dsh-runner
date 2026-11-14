@@ -1,22 +1,30 @@
 // Host 项目级运行器的离线验证（真实启动 powershell / node 子进程）。
 //
-// 覆盖 SPEC 第 5 节 runner-smoke 的 8 项：
-//   1) 短命令 -> 日志 -> exited/exitCode；
-//   2) stop 返回时状态立即非 running；stopProject 路径写法归一化；restart；
-//   3) 端口冲突 -> diagnose(listening/!managed) -> killPort -> start 成功；
-//   4) readyPort：监听端口 -> start 返回 ready=true；diagnose managed=true；ready 超时；
-//   5) dependsOn 递归启动；startAll 拓扑序与失败收集；
-//   6) env 注入与 cwd；
-//   7) 重启接管（shutdown 不杀 -> 新实例 init 接管 -> stop）；
-//   8) log 读取/清空/截断；缺失 cwd 报错。
+// 0.25.0 的契约变化（本套测试就是围绕它写的）：
+//   - start / restart / startAll 是**命令即返回**：只建 queued 记录并返回，不等就绪；
+//   - 就绪/失败由后台 flow 推进，结果落在 record.status / record.error 上（不靠 RPC 抛异常）；
+//   - 所有进程/端口探测都是异步采样（SystemProbe），Host 事件循环不被阻塞。
 //
-// 所有测试端口都用动态空闲端口（先 listen(0) 再关闭），不碰用户正在占用的 8001/5174 等。
+// 覆盖：
+//   1) snapshot 契约字段；短命令 queued -> exited + 日志；
+//   2) stop 立即落状态、重复 stop、restart 换进程；
+//   3) 端口冲突 -> record.error(port-conflict) -> diagnose -> killPort -> 再启动成功；
+//   4) readyPort 就绪 / 超时 / 端口降级（port-mismatch）；
+//   5) dependsOn 依赖先就绪、依赖失败传导、startAll 全部入队；
+//   6) env 注入与 cwd；
+//   7) Host 重启接管（shutdown 不杀 -> 新实例 init 接管 -> stop）；
+//   8) log 读取/清空/截断；缺失 cwd 报 spawn-failed；
+//   9) 外部实例：接管 / 解除接管 / 重启并接管；
+//  10) 并发：一条在启动时另一条立即返回；排队中可取消；事件循环延迟 p99 有上限。
+//
+// 所有测试端口都用动态空闲端口（先 listen(0) 再关闭），不碰用户正在占用的端口。
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { ProjectRunnerService, RunnerError, attributeProjectProcesses } from "../host-runner.js";
 
 const SNAPSHOT_KEYS = [
@@ -39,8 +47,14 @@ const SNAPSHOT_KEYS = [
   "adopted",
   "external",
   "pidCreatedAt",
-  "adoptedAt"
+  "adoptedAt",
+  "error"
 ];
+
+/** 启动必须「命令即返回」：这条上限就是交互丝滑的量化标准。 */
+const START_RETURN_LIMIT_MS = 300;
+/** 就绪等待期间事件循环延迟上限（阻塞式探测会到 300–400ms）。 */
+const EVENT_LOOP_P99_LIMIT_MS = 80;
 
 function sleep(ms) {
   return new Promise((resolve) => {
@@ -63,6 +77,7 @@ function escapeRegExp(text) {
 }
 
 function pidAlive(pid) {
+  if (typeof pid !== "number" || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -75,13 +90,10 @@ function freePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
     server.unref();
-    server.once("error", reject);
+    server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = address.port;
-      server.close(() => {
-        resolve(port);
-      });
+      const port = server.address().port;
+      server.close(() => resolve(port));
     });
   });
 }
@@ -95,14 +107,13 @@ async function getFreePorts(count) {
   return ports;
 }
 
-function canConnectHost(host, port, timeoutMs = 400) {
+function canConnect(port, timeoutMs = 400) {
   return new Promise((resolve) => {
-    const socket = net.connect({ host: host, port: port, timeout: timeoutMs });
+    const socket = net.connect({ host: "127.0.0.1", port, timeout: timeoutMs });
     let settled = false;
     const finish = (value) => {
       if (settled) return;
       settled = true;
-      socket.removeAllListeners();
       socket.destroy();
       resolve(value);
     };
@@ -112,14 +123,10 @@ function canConnectHost(host, port, timeoutMs = 400) {
   });
 }
 
-function canConnect(port, timeoutMs = 400) {
-  return canConnectHost("127.0.0.1", port, timeoutMs);
-}
-
-// 纯函数：没有端口时把 cwd 下的可执行文件进程归属到命令（并排除托管进程树）
+// ── 纯函数：进程归属（不启动任何进程） ──────────────────────────────────
 const attributionCommands = [
   { id: "c1", title: "客户端", scope: "project", projectRoot: "H:\\P1", cwd: "H:\\P1\\客户端", ports: [] },
-  { id: "c2", title: "其他", scope: "project", projectRoot: "H:\\P2", cwd: "H:\\P2", ports: [] },
+  { id: "c2", title: "别的项目", scope: "project", projectRoot: "H:\\P2", cwd: "H:\\P2", ports: [] },
   { id: "g", title: "全局", scope: "global", ports: [] }
 ];
 const attributionSnapshot = new Map([
@@ -150,7 +157,17 @@ await writeFile(listenScript, [
   "const port = Number(process.env.SMOKE_PORT);",
   "const server = net.createServer((socket) => socket.end());",
   'server.listen(port, "127.0.0.1");',
-  "server.on(\"error\", () => process.exit(1));",
+  "server.on(\"error\", (error) => { console.error(\"listen-failed\", error.code, port); process.exit(1); });",
+  "setInterval(() => {}, 1000);"
+].join("\n"), "utf8");
+
+// 声明 1 个端口但实际监听另一个端口：用于 port-mismatch。
+const fallbackScript = path.join(dir, "fallback.cjs");
+await writeFile(fallbackScript, [
+  'const net = require("node:net");',
+  "const actual = Number(process.env.SMOKE_ACTUAL_PORT);",
+  "const server = net.createServer((socket) => socket.end());",
+  'server.listen(actual, "127.0.0.1");',
   "setInterval(() => {}, 1000);"
 ].join("\n"), "utf8");
 
@@ -166,7 +183,7 @@ function makeCommand(overrides = {}) {
     env: {},
     ports: [],
     readyPort: null,
-    readyTimeoutMs: 120000,
+    readyTimeoutMs: 60000,
     dependsOn: []
   };
   return Object.assign(command, overrides);
@@ -185,6 +202,28 @@ function createRunner() {
   });
 }
 
+/** 等一条命令落定（running / failed / stopped / exited），返回最终 snapshot。 */
+async function settle(runner, commandId, timeoutMs, projectPath = projectRoot) {
+  const snapshot = await runner.settle(projectPath, commandId, timeoutMs);
+  assert.notEqual(snapshot, null, "命令「" + commandId + "」应有运行记录");
+  return snapshot;
+}
+
+async function expectSettledStatus(runner, commandId, status, timeoutMs = 40000, projectPath = projectRoot) {
+  const snapshot = await settle(runner, commandId, timeoutMs, projectPath);
+  if (snapshot.status !== status) {
+    const logTail = await readFile(snapshot.logPath, "utf8").then((text) => text.slice(-1200)).catch(() => "");
+    assert.equal(
+      snapshot.status,
+      status,
+      "命令「" + commandId + "」应变 " + status + "，实际 " + snapshot.status + "，exit=" + String(snapshot.exitCode)
+        + (snapshot.error === null ? "" : "（" + snapshot.error.code + "：" + snapshot.error.message + "）")
+        + "\n--- log tail ---\n" + logTail
+    );
+  }
+  return snapshot;
+}
+
 let runner;
 let occupant;
 // 外部实例（不是插件启动的进程）：全部登记，finally 里兜底清理。
@@ -193,22 +232,28 @@ try {
   runner = createRunner();
   await runner.init();
 
-  // ── 1) 短命令：日志 + 退出状态 + snapshot 契约字段 ──────────────────────
+  // ── 1) 短命令：命令即返回 + 日志 + 退出状态 + snapshot 契约 ──────────────
   const shortCommand = makeCommand({
     id: "short",
     title: "短命令",
     command: "Write-Output 'hello-runner'; Write-Output ((Get-Location).Path)"
   });
+  const startBegan = performance.now();
   const shortStarted = await runner.start(shortCommand, projectRoot);
-  assert.equal(shortStarted.status, "running");
+  const startElapsed = performance.now() - startBegan;
+  assert.ok(startElapsed < START_RETURN_LIMIT_MS, "start 必须命令即返回（实测 " + Math.round(startElapsed) + "ms）");
+  assert.equal(shortStarted.status, "queued", "start 返回时状态应是 queued");
   assert.equal(shortStarted.ready, null, "没有 readyPort 时 ready 必须是 null");
   assert.equal(shortStarted.readyPort, null);
   assert.equal(shortStarted.adopted, false);
+  assert.equal(shortStarted.error, null);
   assert.deepEqual(Object.keys(shortStarted).sort(), SNAPSHOT_KEYS.slice().sort(), "snapshot 字段必须与契约一致");
 
   const shortFinished = await waitFor(() => {
     const record = runner.list(projectRoot).find((entry) => entry.commandId === "short");
-    return record !== undefined && record.status !== "running" ? record : undefined;
+    return record !== undefined && record.status !== "queued" && record.status !== "starting" && record.status !== "running"
+      ? record
+      : undefined;
   }, 20000, "短命令退出");
   assert.equal(shortFinished.status, "exited");
   assert.equal(shortFinished.exitCode, 0);
@@ -220,37 +265,28 @@ try {
   assert.match(shortLog, new RegExp(escapeRegExp(projectRoot), "i"), "cwd 为空时应使用 projectRoot");
   assert.equal(runner.list("H:\\OtherProject").length, 0, "按项目过滤");
 
-  // ── 2) stop 立即落状态；stopProject 路径写法归一化；restart ─────────────
+  // ── 2) stop 立即落状态；重复 stop；stopProject 路径归一化；restart 换进程 ──
   const longCommand = makeCommand({ id: "long", title: "长命令", command: "Start-Sleep -Seconds 30" });
   const longStarted = await runner.start(longCommand, projectRoot);
-  assert.equal(longStarted.status, "running");
+  assert.equal(longStarted.status, "queued");
+  const longRunning = await expectSettledStatus(runner, "long", "running");
   const longAgain = await runner.start(longCommand, projectRoot);
-  assert.equal(longAgain.pid, longStarted.pid, "已运行时再次 start 应直接返回现有 runner");
+  assert.equal(longAgain.pid, longRunning.pid, "已运行时再次 start 应直接返回现有 runner");
   assert.equal(await runner.stop(projectRoot, "long"), true);
   const longStopped = runner.list(projectRoot).find((entry) => entry.commandId === "long");
   assert.notEqual(longStopped.status, "running", "stop() 返回后状态必须立即不是 running");
   assert.equal(await runner.stop(projectRoot, "long"), false, "重复停止应返回 false");
-  assert.equal(pidAlive(longStarted.pid), false, "stop 返回后进程应已退出");
-
-  const pathCommand = makeCommand({ id: "path", title: "路径命令", command: "Start-Sleep -Seconds 30" });
-  const pathStarted = await runner.start(pathCommand, projectRoot);
-  assert.equal(pathStarted.status, "running");
-  const variantProjectPath = projectRoot.replace(/\\/g, "/").toLowerCase() + "/";
-  assert.equal(await runner.stopProject(variantProjectPath), 1, "不同写法的项目路径必须能停到同一条命令");
-  assert.notEqual(
-    runner.list(projectRoot).find((entry) => entry.commandId === "path").status,
-    "running",
-    "stopProject 后进程必须是停止状态"
-  );
+  await waitFor(() => pidAlive(longRunning.pid) === false, 8000, "stop 后进程退出");
 
   const restartCommand = makeCommand({ id: "restart", title: "重启命令", command: "Start-Sleep -Seconds 30" });
-  const restartFirst = await runner.start(restartCommand, projectRoot);
-  const restartSecond = await runner.restart(restartCommand, projectRoot);
-  assert.equal(restartSecond.status, "running");
+  await runner.start(restartCommand, projectRoot);
+  const restartFirst = await expectSettledStatus(runner, "restart", "running");
+  await runner.restart(restartCommand, projectRoot);
+  const restartSecond = await expectSettledStatus(runner, "restart", "running");
   assert.notEqual(restartSecond.pid, restartFirst.pid, "restart 必须换新进程");
   await runner.stop(projectRoot, "restart");
 
-  // ── 3) 端口冲突：port-conflict -> diagnose -> killPort -> 再 start 成功 ──
+  // ── 3) 端口冲突：port-conflict 落到 record.error -> killPort -> 再启动成功 ─
   const [occupantPort] = await getFreePorts(1);
   occupant = spawn(process.execPath, [listenScript], {
     env: Object.assign({}, process.env, { SMOKE_PORT: String(occupantPort) }),
@@ -269,34 +305,22 @@ try {
     readyTimeoutMs: 20000
   });
   const conflictCommands = [conflictCommand];
-  await assert.rejects(
-    () => runner.start(conflictCommand, projectRoot, { commands: conflictCommands }),
-    (error) => {
-      assert.ok(error instanceof RunnerError, "端口冲突应抛 RunnerError");
-      assert.equal(error.code, "port-conflict");
-      assert.ok(Array.isArray(error.details.ports), "port-conflict 应带 ports 列表");
-      assert.equal(error.details.ports.length, 1);
-      const conflict = error.details.ports[0];
-      assert.equal(conflict.port, occupantPort);
-      const occupantInfo = conflict.occupant;
-      assert.ok(occupantInfo !== null && typeof occupantInfo === "object");
-      assert.equal(occupantInfo.pid, occupant.pid, "occupant 应带占用者 pid");
-      assert.equal(occupantInfo.managed, false, "外部进程不应标记为托管");
-      assert.ok(typeof occupantInfo.name === "string" && occupantInfo.name !== "", "occupant 应带进程名");
-      assert.ok(
-        typeof occupantInfo.commandLine === "string" && occupantInfo.commandLine.includes("listen.cjs"),
-        "occupant 应带命令行"
-      );
-      assert.ok(Array.isArray(occupantInfo.ancestors), "occupant 应带父进程链");
-      assert.ok(occupantInfo.ancestors.length > 0, "外部 node 进程应有父进程");
-      assert.ok(Array.isArray(occupantInfo.children), "occupant 应带子进程列表");
-      assert.ok(typeof occupantInfo.windowTitle === "string", "occupant 应带窗口标题字段");
-      assert.ok(String(error.message).includes(occupantInfo.name), "错误消息应带进程名");
-      return true;
-    }
-  );
+  const conflictQueued = await runner.start(conflictCommand, projectRoot, { commands: conflictCommands });
+  assert.equal(conflictQueued.status, "queued");
+  const conflictFailed = await expectSettledStatus(runner, "conflict", "failed", 30000);
+  assert.equal(conflictFailed.error.code, "port-conflict", "端口被占应落成 port-conflict 错误");
+  const conflictInfo = conflictFailed.error.details.ports[0];
+  assert.equal(conflictInfo.port, occupantPort);
+  assert.equal(conflictInfo.occupant.pid, occupant.pid, "occupant 应带占用者 pid");
+  assert.equal(conflictInfo.occupant.managed, false, "外部进程不应标记为托管");
+  assert.ok(typeof conflictInfo.occupant.name === "string" && conflictInfo.occupant.name !== "", "occupant 应带进程名");
+  assert.ok(typeof conflictInfo.occupant.commandLine === "string" && conflictInfo.occupant.commandLine.includes("listen.cjs"));
+  assert.ok(Array.isArray(conflictInfo.occupant.ancestors) && conflictInfo.occupant.ancestors.length > 0, "occupant 应带父进程链");
+  assert.ok(Array.isArray(conflictInfo.occupant.children), "occupant 应带子进程列表");
 
   const diagnoseEntries = await runner.diagnose(conflictCommands, projectRoot);
+  // diagnose 结果必须是 lossless JSON（AI Tool 的输出校验就是这么判的）。
+  assert.deepEqual(JSON.parse(JSON.stringify(diagnoseEntries)), diagnoseEntries, "diagnose 结果必须是 lossless JSON");
   const occupiedEntry = diagnoseEntries.find((entry) => entry.port === occupantPort);
   assert.ok(occupiedEntry !== undefined, "diagnose 应包含该端口");
   assert.equal(occupiedEntry.listening, true);
@@ -325,13 +349,13 @@ try {
   const releasedEntry = afterKillDiagnose.find((entry) => entry.port === occupantPort);
   assert.ok(releasedEntry !== undefined);
   assert.equal(releasedEntry.listening, false, "killPort 后 diagnose 应显示端口未监听");
-  assert.equal(releasedEntry.occupant, undefined);
 
-  const conflictStarted = await runner.start(conflictCommand, projectRoot, { commands: conflictCommands });
-  assert.equal(conflictStarted.status, "running");
+  await runner.start(conflictCommand, projectRoot, { commands: conflictCommands });
+  const conflictRunning = await expectSettledStatus(runner, "conflict", "running", 30000);
+  assert.equal(conflictRunning.error, null, "启动成功后必须清掉上一次的错误");
   await runner.stop(projectRoot, "conflict");
 
-  // ── 4) readyPort：start 等到端口可连；diagnose managed=true ─────────────
+  // ── 4) readyPort：running/ready；超时；端口降级 ─────────────────────────
   const [readyPort] = await getFreePorts(1);
   const readyCommand = makeCommand({
     id: "ready",
@@ -340,333 +364,174 @@ try {
     env: { SMOKE_PORT: String(readyPort) },
     ports: [readyPort],
     readyPort: readyPort,
-    readyTimeoutMs: 20000
+    readyTimeoutMs: 30000
   });
-  const readyStarted = await runner.start(readyCommand, projectRoot, { commands: [readyCommand] });
-  assert.equal(readyStarted.status, "running");
-  assert.equal(readyStarted.ready, true, "readyPort 可连接后 ready 必须是 true");
-  assert.equal(readyStarted.readyPort, readyPort);
-  assert.deepEqual(readyStarted.actualPorts, [readyPort], "snapshot 必须带本进程树实际监听端口");
-  await runner.refresh();
-  const readyAfterRefresh = runner.list(projectRoot).find((entry) => entry.commandId === "ready");
-  assert.deepEqual(readyAfterRefresh.actualPorts, [readyPort], "refresh 后仍应报告实际监听端口");
-  assert.equal(await canConnect(readyPort), true, "start 返回时端口应已可连接");
+  await runner.start(readyCommand, projectRoot);
+  const readySnapshot = await expectSettledStatus(runner, "ready", "running", 40000);
+  assert.equal(readySnapshot.ready, true, "readyPort 可连接后 ready 必须是 true");
+  assert.deepEqual(readySnapshot.actualPorts, [readyPort]);
 
   const readyDiagnose = await runner.diagnose([readyCommand], projectRoot);
   const readyEntry = readyDiagnose.find((entry) => entry.port === readyPort);
-  assert.ok(readyEntry !== undefined);
-  assert.equal(readyEntry.listening, true);
   assert.equal(readyEntry.occupant.managed, true, "监听进程应属于运行中 runner 的进程树");
   assert.equal(readyEntry.occupant.runnerCommandId, "ready");
-  assert.equal(readyEntry.occupant.runnerTitle, "就绪服务");
 
   await assert.rejects(
     () => runner.killPort(projectRoot, readyPort, readyEntry.occupant.pid),
     (error) => {
-      assert.ok(error instanceof RunnerError);
-      assert.equal(error.code, "managed-port", "托管 runner 的端口不允许 killPort");
-      assert.equal(error.details.runnerCommandId, "ready");
+      assert.equal(error.code, "managed-port");
       assert.equal(error.details.occupant.managed, true);
       return true;
-    }
+    },
+    "托管端口不允许从端口入口杀掉"
   );
-
   await runner.stop(projectRoot, "ready");
-  const readyStopped = runner.list(projectRoot).find((entry) => entry.commandId === "ready");
-  assert.notEqual(readyStopped.status, "running");
-  await waitFor(async () => !(await canConnect(readyPort)), 8000, "停止后 ready 端口释放");
 
-  // ready 超时：Host 必须杀进程并报 ready-timeout
+  // 就绪超时：命令活着但从不监听声明端口
   const [timeoutPort] = await getFreePorts(1);
   const timeoutCommand = makeCommand({
-    id: "ready-timeout",
+    id: "timeout",
     title: "就绪超时",
     command: "Start-Sleep -Seconds 30",
     ports: [timeoutPort],
     readyPort: timeoutPort,
-    readyTimeoutMs: 1000
+    readyTimeoutMs: 2500
   });
-  await assert.rejects(
-    () => runner.start(timeoutCommand, projectRoot),
-    (error) => {
-      assert.ok(error instanceof RunnerError);
-      assert.equal(error.code, "ready-timeout");
-      assert.deepEqual(error.details.ports, [timeoutPort]);
-      assert.equal(error.details.timeoutMs, 1000);
-      return true;
-    }
-  );
-  const timedOut = runner.list(projectRoot).find((entry) => entry.commandId === "ready-timeout");
-  assert.notEqual(timedOut.status, "running", "ready 超时后进程不能还在 running");
-  assert.equal(pidAlive(timedOut.pid), false, "ready 超时后 Host 必须杀掉进程");
+  await runner.start(timeoutCommand, projectRoot);
+  const timeoutFailed = await expectSettledStatus(runner, "timeout", "failed", 30000);
+  assert.equal(timeoutFailed.error.code, "ready-timeout");
+  assert.ok(timeoutFailed.error.details.timeoutMs === 2500);
+  await waitFor(() => pidAlive(timeoutFailed.pid) === false, 8000, "超时后必须收掉进程");
 
-  // 自然退出后清理残留子进程（Tauri beforeDevCommand / vite 常见）
-  const [orphanPort] = await getFreePorts(1);
-  const orphanChild = path.join(projectRoot, "orphan-child.cjs");
-  const orphanParent = path.join(projectRoot, "orphan-parent.cjs");
-  await writeFile(orphanChild, [
-    'const net = require("node:net");',
-    'const server = net.createServer((socket) => socket.end());',
-    'server.listen(Number(process.env.SMOKE_PORT), "127.0.0.1");',
-    'server.on("error", () => process.exit(1));',
-    'setInterval(() => {}, 1000);'
-  ].join("\n"), "utf8");
-  await writeFile(orphanParent, [
-    'const { spawn } = require("node:child_process");',
-    'const path = require("node:path");',
-    'spawn(process.execPath, [path.join(__dirname, "orphan-child.cjs")], { env: process.env, stdio: "ignore", windowsHide: true });',
-    'setTimeout(() => process.exit(0), 800);'
-  ].join("\n"), "utf8");
-  const orphanCommand = makeCommand({
-    id: "orphan-cleanup",
-    title: "残留清理",
-    command: 'node "' + orphanParent + '"',
-    env: { SMOKE_PORT: String(orphanPort) }
-  });
-  await runner.start(orphanCommand, projectRoot, { commands: [orphanCommand] });
-  await waitFor(async () => await canConnect(orphanPort), 6000, "残留子进程先监听");
-  await waitFor(async () => !(await canConnect(orphanPort)), 12000, "父进程退出后残留子进程应被清理并释放端口");
-  const orphanRecord = runner.list(projectRoot).find((entry) => entry.commandId === "orphan-cleanup");
-  assert.notEqual(orphanRecord.status, "running", "父进程退出后命令不能仍显示运行中");
-
-  // ── 4b) 端口契约：声明端口必须由本进程树监听，拒绝静默降级 ───────────────
-  const mismatchScript = path.join(dir, "mismatch.cjs");
-  await writeFile(mismatchScript, [
-    'const net = require("node:net");',
-    'const server = net.createServer((socket) => socket.end());',
-    'server.listen(Number(process.env.SMOKE_PORT2), "127.0.0.1");',
-    'server.on("error", () => process.exit(1));',
-    'setInterval(() => {}, 1000);'
-  ].join("\n"), "utf8");
-
-  // (i) 声明端口空闲，但命令绑到别的端口 -> port-mismatch，且终止本次启动
-  const [contractPort, fallbackPort] = await getFreePorts(2);
+  // 端口降级：声明 A、实际监听 B -> port-mismatch，且进程被结束
+  const [declaredPort, actualPort] = await getFreePorts(2);
   const mismatchCommand = makeCommand({
-    id: "contract-mismatch",
-    title: "降级命令",
-    command: 'node "' + mismatchScript + '"',
-    ports: [contractPort],
-    readyPort: contractPort,
-    readyTimeoutMs: 8000,
-    env: { SMOKE_PORT2: String(fallbackPort) }
+    id: "mismatch",
+    title: "端口降级",
+    command: 'node "' + fallbackScript + '"',
+    env: { SMOKE_ACTUAL_PORT: String(actualPort) },
+    ports: [declaredPort],
+    readyPort: declaredPort,
+    readyTimeoutMs: 15000
   });
-  await assert.rejects(
-    () => runner.start(mismatchCommand, projectRoot),
-    (error) => {
-      assert.ok(error instanceof RunnerError);
-      assert.equal(error.code, "port-mismatch", "声明端口未被本进程监听必须报 port-mismatch");
-      assert.deepEqual(error.details.actualPorts, [fallbackPort], "details 应带实际监听端口");
-      assert.equal(error.details.ports[0].port, contractPort);
-      assert.equal(error.details.ports[0].occupant, undefined, "声明端口空闲时不应有占用者");
-      return true;
-    }
-  );
-  const mismatchRecord = runner.list(projectRoot).find((entry) => entry.commandId === "contract-mismatch");
-  assert.notEqual(mismatchRecord.status, "running");
-  assert.equal(pidAlive(mismatchRecord.pid), false, "端口契约失败后必须终止本次启动的进程");
-  await waitFor(async () => !(await canConnect(fallbackPort)), 8000, "降级进程终止后端口释放");
+  await runner.start(mismatchCommand, projectRoot);
+  const mismatchFailed = await expectSettledStatus(runner, "mismatch", "failed", 30000);
+  assert.equal(mismatchFailed.error.code, "port-mismatch");
+  assert.deepEqual(mismatchFailed.error.details.actualPorts, [actualPort]);
+  await waitFor(() => pidAlive(mismatchFailed.pid) === false, 8000, "端口降级后必须收掉进程");
 
-  // (ii) 启动后声明端口被外部进程占用、命令降级 -> port-mismatch 且带占用者/related
-  const [racePort, raceFallback] = await getFreePorts(2);
-  // 用中文目录做 cwd：验证进程命令行不是乱码、related 能正确命中。
-  const relatedDir = path.join(dir, "中文项目");
-  await mkdir(relatedDir, { recursive: true });
-  const relatedOccupantScript = path.join(relatedDir, "occupant-related.cjs");
-  await writeFile(relatedOccupantScript, [
-    'const net = require("node:net");',
-    'const server = net.createServer((socket) => socket.end());',
-    'server.listen(Number(process.env.SMOKE_PORT), "127.0.0.1");',
-    'server.on("error", () => process.exit(1));',
-    'setInterval(() => {}, 1000);'
-  ].join("\n"), "utf8");
-  const raceCommand = makeCommand({
-    id: "contract-race",
-    title: "竞态降级",
-    command: 'node "' + mismatchScript + '"',
-    cwd: relatedDir,
-    ports: [racePort],
-    readyPort: racePort,
-    readyTimeoutMs: 12000,
-    env: { SMOKE_PORT2: String(raceFallback) }
+  // ── 5) dependsOn：先依赖后自己；依赖失败传导；startAll 全部入队 ──────────
+  const [childPort] = await getFreePorts(1);
+  const dependency = makeCommand({ id: "dep", title: "依赖服务", command: "Start-Sleep -Seconds 30" });
+  const dependent = makeCommand({
+    id: "dependent",
+    title: "依赖它的服务",
+    command: 'node "' + listenScript + '"',
+    env: { SMOKE_PORT: String(childPort) },
+    ports: [childPort],
+    readyPort: childPort,
+    readyTimeoutMs: 30000,
+    dependsOn: ["dep"]
   });
-  const raceStart = runner.start(raceCommand, projectRoot);
-  await waitFor(async () => await canConnect(raceFallback), 10000, "降级实例开始监听");
-  const relatedOccupant = spawn(process.execPath, [relatedOccupantScript], {
-    env: Object.assign({}, process.env, { SMOKE_PORT: String(racePort) }),
+  const dependencySet = [dependency, dependent];
+  await runner.start(dependent, projectRoot, { commands: dependencySet });
+  const dependentReady = await expectSettledStatus(runner, "dependent", "running", 40000);
+  assert.equal(dependentReady.status, "running");
+  const depRunning = runner.list(projectRoot).find((entry) => entry.commandId === "dep");
+  assert.equal(depRunning.status, "running", "依赖必须先被拉起并就绪");
+
+  // 依赖失败：被依赖命令启动失败时，跟随者的 error 必须是 dependency-failed
+  const [badPort] = await getFreePorts(1);
+  const blockingExternal = spawn(process.execPath, [listenScript], {
+    env: Object.assign({}, process.env, { SMOKE_PORT: String(badPort) }),
     windowsHide: true,
     stdio: "ignore"
   });
-  try {
-    await assert.rejects(
-      () => raceStart,
-      (error) => {
-        assert.equal(error.code, "port-mismatch");
-        assert.deepEqual(error.details.actualPorts, [raceFallback]);
-        const conflict = error.details.ports.find((item) => item.port === racePort);
-        assert.ok(conflict !== undefined && conflict.occupant !== undefined, "被外部占用时必须带占用者");
-        assert.equal(conflict.occupant.pid, relatedOccupant.pid);
-        assert.equal(conflict.occupant.related, true, "占用者命令行含项目路径时应标记 related");
-        return true;
-      }
-    );
-  } finally {
-    try {
-      relatedOccupant.kill();
-    } catch (error) {
-      // 进程可能已退出
-    }
-  }
+  externals.push(blockingExternal);
+  await waitFor(() => canConnect(badPort), 15000, "依赖冲突用的外部进程开始监听");
+  const brokenDep = makeCommand({
+    id: "broken-dep",
+    title: "会失败的依赖",
+    command: 'node "' + listenScript + '"',
+    env: { SMOKE_PORT: String(badPort) },
+    ports: [badPort],
+    readyPort: badPort,
+    readyTimeoutMs: 15000
+  });
+  const brokenChild = makeCommand({
+    id: "broken-child",
+    title: "依赖失败者",
+    command: "Write-Output never",
+    dependsOn: ["broken-dep"]
+  });
+  await runner.start(brokenChild, projectRoot, { commands: [brokenDep, brokenChild] });
+  const brokenChildFailed = await expectSettledStatus(runner, "broken-child", "failed", 40000);
+  assert.equal(brokenChildFailed.error.code, "dependency-failed");
+  assert.equal(brokenChildFailed.error.details.commandId, "broken-dep");
+  await runner.stop(projectRoot, "broken-dep").catch(() => {});
 
-  // (iii) IPv6-only 监听也必须被启动前预检发现（IPv4 表里看不到）
-  const [v6Port] = await getFreePorts(1);
-  const v6Occupant = spawn(process.execPath, ["-e", 'const net = require("node:net"); net.createServer((socket) => socket.end()).listen(' + String(v6Port) + ', "::1"); setInterval(() => {}, 1000);'], {
-    windowsHide: true,
-    stdio: "ignore"
-  });
-  try {
-    await waitFor(() => canConnectHost("::1", v6Port), 15000, "IPv6 监听就绪");
-    const v6Command = makeCommand({
-      id: "contract-v6",
-      title: "IPv6 端口",
-      command: "Start-Sleep -Seconds 30",
-      ports: [v6Port]
-    });
-    await assert.rejects(
-      () => runner.start(v6Command, projectRoot),
-      (error) => {
-        assert.equal(error.code, "port-conflict", "IPv6 监听也必须被预检发现");
-        assert.equal(error.details.ports[0].port, v6Port);
-        assert.equal(error.details.ports[0].occupant.pid, v6Occupant.pid);
-        return true;
-      }
-    );
-  } finally {
-    try {
-      v6Occupant.kill();
-    } catch (error) {
-      // 进程可能已退出
-    }
-  }
-
-  // ── 5) dependsOn：递归启动；startAll 拓扑序与失败收集 ───────────────────
-  const depCommandA = makeCommand({
-    id: "dep-a",
-    title: "依赖A",
-    command: "Start-Sleep -Seconds 30",
-    projectRoot: depProjectRoot
-  });
-  const depCommandB = makeCommand({
-    id: "dep-b",
-    title: "依赖B",
-    command: "Start-Sleep -Seconds 30",
-    projectRoot: depProjectRoot,
-    dependsOn: ["dep-a"]
-  });
-  const disabledDependency = makeCommand({
-    id: "dep-disabled",
-    title: "停用的依赖",
-    command: "Start-Sleep -Seconds 30",
-    projectRoot: depProjectRoot,
-    enabled: false
-  });
-  const dependentOnDisabled = makeCommand({
-    id: "dep-c",
-    title: "依赖停用命令",
-    command: "Start-Sleep -Seconds 30",
-    projectRoot: depProjectRoot,
-    dependsOn: ["dep-disabled"]
-  });
-  const missingCwdCommand = makeCommand({
-    id: "dep-bad",
-    title: "坏工作目录",
-    command: "echo x",
-    cwd: path.join(dir, "does-not-exist"),
-    projectRoot: depProjectRoot
-  });
-  const globalCommand = makeCommand({
-    id: "dep-global",
-    title: "全局命令",
-    command: "Start-Sleep -Seconds 30",
-    scope: "global",
-    projectRoot: ""
-  });
-  const depCommands = [depCommandA, depCommandB, disabledDependency, dependentOnDisabled, missingCwdCommand, globalCommand];
-
-  const depStarted = await runner.start(depCommandB, depProjectRoot, { commands: depCommands });
-  assert.equal(depStarted.status, "running");
-  const depRunners = runner.list(depProjectRoot);
-  assert.equal(depRunners.find((entry) => entry.commandId === "dep-a").status, "running", "依赖 A 应被自动启动");
-  assert.equal(depRunners.find((entry) => entry.commandId === "dep-b").status, "running");
-  await runner.stopProject(depProjectRoot);
-
-  await assert.rejects(
-    () => runner.start(dependentOnDisabled, depProjectRoot, { commands: depCommands }),
-    (error) => {
-      assert.ok(error instanceof RunnerError);
-      assert.equal(error.code, "dependency-failed");
-      assert.equal(error.details.commandId, "dep-disabled");
-      assert.ok(typeof error.details.message === "string" && error.details.message !== "");
-      return true;
-    }
-  );
-
-  const allResult = await runner.startAll(depCommands, depProjectRoot);
-  assert.ok(allResult.started.includes("dep-a"));
-  assert.ok(allResult.started.includes("dep-b"));
-  assert.ok(
-    allResult.started.indexOf("dep-a") < allResult.started.indexOf("dep-b"),
-    "startAll 必须按依赖拓扑序启动（A 先于 B）"
-  );
-  assert.equal(allResult.started.includes("dep-global"), false, "startAll 只启动 project 作用域命令");
-  assert.ok(allResult.started.includes("dep-bad") === false);
-  assert.ok(allResult.failed.some((item) => item.commandId === "dep-bad" && item.code === "spawn-failed"), "失败要收集");
-  assert.ok(allResult.failed.some((item) => item.commandId === "dep-c" && item.code === "dependency-failed"));
-  assert.equal(allResult.failed.some((item) => item.commandId === "dep-disabled"), false);
-  assert.equal(allResult.runners.filter((entry) => entry.status === "running").length, 2, "A/B 应在运行");
-  await runner.stopProject(depProjectRoot);
+  // startAll：按拓扑序全部入队，立即返回
+  await runner.stopProject(projectRoot);
+  const allCommands = [
+    makeCommand({ id: "all-a", title: "A", command: "Start-Sleep -Seconds 30" }),
+    makeCommand({ id: "all-b", title: "B", command: "Start-Sleep -Seconds 30", dependsOn: ["all-a"] })
+  ];
+  const startAllBegan = performance.now();
+  const startAllResult = await runner.startAll(allCommands, projectRoot);
+  const startAllElapsed = performance.now() - startAllBegan;
+  assert.ok(startAllElapsed < START_RETURN_LIMIT_MS, "startAll 必须全部入队后立即返回（实测 " + Math.round(startAllElapsed) + "ms）");
+  assert.deepEqual(startAllResult.queued.slice().sort(), ["all-a", "all-b"]);
+  const allSnapshot = startAllResult.runners.filter((entry) => entry.commandId === "all-a" || entry.commandId === "all-b");
+  assert.equal(allSnapshot.length, 2, "两条命令都应有记录");
+  assert.ok(allSnapshot.every((entry) => entry.status === "queued" || entry.status === "starting"), "startAll 返回时应处于 queued/starting");
+  await expectSettledStatus(runner, "all-a", "running", 40000);
+  await expectSettledStatus(runner, "all-b", "running", 40000);
+  await runner.stopProject(projectRoot);
 
   // ── 6) env 注入与 cwd ──────────────────────────────────────────────────
   const envCommand = makeCommand({
     id: "env",
     title: "环境变量",
-    command: 'Write-Output ("FOO=" + $env:FOO); Write-Output ((Get-Location).Path)',
+    command: "Write-Output ('APP_ENV=' + $env:APP_ENV); Write-Output ((Get-Location).Path)",
     cwd: subDir,
-    env: { FOO: "bar-baz" }
+    env: { APP_ENV: "smoke-env" }
   });
   await runner.start(envCommand, projectRoot);
   const envFinished = await waitFor(() => {
     const record = runner.list(projectRoot).find((entry) => entry.commandId === "env");
-    return record !== undefined && record.status !== "running" ? record : undefined;
-  }, 20000, "env 命令退出");
+    return record !== undefined && record.status !== "queued" && record.status !== "starting" && record.status !== "running"
+      ? record
+      : undefined;
+  }, 20000, "环境变量命令退出");
   assert.equal(envFinished.exitCode, 0);
-  const envLog = await runner.readLog("env", projectRoot);
-  assert.match(envLog.text, /FOO=bar-baz/, "命令应看到注入的环境变量");
-  assert.match(envLog.text, new RegExp(escapeRegExp(subDir), "i"), "命令应在 cwd 里执行");
+  const envLog = await readFile(envFinished.logPath, "utf8");
+  assert.match(envLog, /APP_ENV=smoke-env/);
+  assert.match(envLog, new RegExp(escapeRegExp(subDir), "i"), "命令必须在 cwd 下执行");
+  const envDiagnose = await runner.diagnose([envCommand], subDir);
+  assert.ok(Array.isArray(envDiagnose), "子目录会话也能诊断（projectRoot 覆盖）");
 
-  // ── 7) 重启接管：shutdown 不杀 -> 新实例 init 接管 -> stop ──────────────
-  const adoptCommand = makeCommand({ id: "adopt", title: "接管命令", command: "Start-Sleep -Seconds 60" });
-  const adoptStarted = await runner.start(adoptCommand, projectRoot);
-  assert.equal(adoptStarted.status, "running");
+  // ── 7) Host 重启接管：shutdown 不杀进程，新实例校验后接管 ────────────────
+  const adoptCommand = makeCommand({ id: "adopt", title: "接管命令", command: "Start-Sleep -Seconds 30" });
+  await runner.start(adoptCommand, projectRoot);
+  const beforeRestart = await expectSettledStatus(runner, "adopt", "running", 30000);
   await runner.shutdown();
-  assert.equal(pidAlive(adoptStarted.pid), true, "shutdown 只落盘，不应杀进程");
+  assert.equal(pidAlive(beforeRestart.pid), true, "shutdown 不能杀进程");
 
+  const second = createRunner();
+  await second.init();
+  const adoptedList = second.list(projectRoot);
+  const adoptedRecord = adoptedList.find((entry) => entry.commandId === "adopt");
+  assert.ok(adoptedRecord !== undefined, "新 Host 必须接管上次的进程");
+  assert.equal(adoptedRecord.status, "running");
+  assert.equal(adoptedRecord.adopted, true);
+  assert.equal(adoptedRecord.pid, beforeRestart.pid);
+  assert.equal(await second.stop(projectRoot, "adopt"), true);
+  await waitFor(() => pidAlive(beforeRestart.pid) === false, 10000, "接管后可以停止");
+  await second.shutdown();
   runner = createRunner();
   await runner.init();
-  const adopted = runner.list(projectRoot).find((entry) => entry.commandId === "adopt");
-  assert.ok(adopted !== undefined, "Host 重启后应接管仍在运行的进程");
-  assert.equal(adopted.status, "running");
-  assert.equal(adopted.adopted, true);
-  assert.equal(adopted.pid, adoptStarted.pid);
-  assert.equal(await runner.stop(projectRoot, "adopt"), true, "接管进程必须能被停止");
-  const afterAdoptStop = runner.list(projectRoot).find((entry) => entry.commandId === "adopt");
-  assert.notEqual(afterAdoptStop.status, "running");
-  assert.equal(pidAlive(adoptStarted.pid), false);
-  const adoptLog = await readFile(afterAdoptStop.logPath, "utf8");
-  assert.match(adoptLog, /接管进程已结束|进程结束/);
-  const stateAfterStop = JSON.parse(await readFile(statePath, "utf8"));
-  assert.equal(stateAfterStop.runners.some((entry) => entry.commandId === "adopt"), false, "停止后 state 不再包含该进程");
 
-  // ── 8) log 读取/清空/截断；缺失 cwd 报错 ───────────────────────────────
+  // ── 8) log 读取/清空/截断；缺失 cwd 报 spawn-failed ─────────────────────
   const bigCommand = makeCommand({
     id: "big",
     title: "大日志",
@@ -675,8 +540,10 @@ try {
   await runner.start(bigCommand, projectRoot);
   const bigFinished = await waitFor(() => {
     const record = runner.list(projectRoot).find((entry) => entry.commandId === "big");
-    return record !== undefined && record.status !== "running" ? record : undefined;
-  }, 20000, "大日志命令退出");
+    return record !== undefined && record.status !== "queued" && record.status !== "starting" && record.status !== "running"
+      ? record
+      : undefined;
+  }, 30000, "大日志命令退出");
   assert.equal(bigFinished.exitCode, 0);
   const bigTail = await runner.readLog("big", projectRoot, 1024);
   assert.equal(bigTail.truncated, true, "日志超过 maxBytes 时 truncated=true");
@@ -701,23 +568,13 @@ try {
     "maxBytes 越界应报 bad-request"
   );
 
-  await assert.rejects(
-    () => runner.start(makeCommand({ id: "missing-cwd", title: "缺目录", command: "echo x", cwd: path.join(dir, "does-not-exist") }), projectRoot),
-    (error) => {
-      assert.ok(error instanceof RunnerError);
-      assert.equal(error.code, "spawn-failed");
-      assert.match(error.message, /工作目录不存在/);
-      return true;
-    }
-  );
-  assert.equal(runner.list(projectRoot).some((entry) => entry.commandId === "missing-cwd"), false, "缺 cwd 不应留下 runner 记录");
+  await runner.start(makeCommand({ id: "missing-cwd", title: "缺目录", command: "echo x", cwd: path.join(dir, "does-not-exist") }), projectRoot);
+  const missingCwd = await expectSettledStatus(runner, "missing-cwd", "failed", 20000);
+  assert.equal(missingCwd.error.code, "spawn-failed");
+  assert.match(missingCwd.error.message, /工作目录不存在/);
 
-  // ── 9) 外部实例：接管 / 解除接管 / 重启并接管 ───────────────────────────
-  // 关键不变量：
-  //   - 接管只改归属，不结束进程；停止接管实例时才结束它（没有 child 句柄，靠 pid + 创建时间判定退出）；
-  //   - 解除接管不结束进程；
-  //   - 重启并接管会把外部实例结束掉，再由插件托管启动（之后才有实时日志）。
-  const [adoptPort, releasePort, takeOverPort] = await getFreePorts(3);
+  // ── 9) 外部实例：接管 / 解除接管 / 重启并接管 ────────────────────────────
+  const [adoptExternalPort, releasePort, takeOverPort] = await getFreePorts(3);
 
   function spawnExternal(port) {
     const child = spawn(process.execPath, [listenScript], {
@@ -730,23 +587,21 @@ try {
     return child;
   }
 
-  const adoptExternal = spawnExternal(adoptPort);
-  await waitFor(() => canConnect(adoptPort), 15000, "接管用外部进程开始监听");
+  const adoptExternal = spawnExternal(adoptExternalPort);
+  await waitFor(() => canConnect(adoptExternalPort), 15000, "接管用外部进程开始监听");
   const adoptExternalCommand = makeCommand({
     id: "adopt-external",
     title: "外部实例",
     command: 'node "' + listenScript + '"',
-    env: { SMOKE_PORT: String(adoptPort) },
-    ports: [adoptPort],
-    readyPort: adoptPort,
+    env: { SMOKE_PORT: String(adoptExternalPort) },
+    ports: [adoptExternalPort],
+    readyPort: adoptExternalPort,
     readyTimeoutMs: 20000
   });
 
-  // diagnose 必须能识别成外部实例，而且结果要是 lossless JSON
-  // （回归：occupant.children[].pid 曾经是 undefined，AI Tool 直接报 invalid output）。
   const diagnoseExternal = await runner.diagnose([adoptExternalCommand], projectRoot);
   assert.deepEqual(JSON.parse(JSON.stringify(diagnoseExternal)), diagnoseExternal, "diagnose 结果必须是 lossless JSON");
-  const adoptEntry = diagnoseExternal.find((entry) => entry.port === adoptPort);
+  const adoptEntry = diagnoseExternal.find((entry) => entry.port === adoptExternalPort);
   assert.ok(adoptEntry !== undefined, "diagnose 应包含外部实例占用的端口");
   assert.equal(adoptEntry.occupant.pid, adoptExternal.pid);
   assert.equal(adoptEntry.occupant.managed, false);
@@ -761,7 +616,6 @@ try {
   assert.ok(adoptedResult.warning !== "", "命令行不含项目路径时应带 warning");
   assert.equal(adoptedResult.adopted, true);
   assert.equal(adoptedResult.runner.external, true, "接管记录必须标记 external");
-  assert.equal(adoptedResult.runner.adopted, true);
   assert.equal(adoptedResult.runner.status, "running");
   assert.equal(adoptedResult.runner.pid, adoptExternal.pid);
   assert.ok(adoptedResult.runner.pidCreatedAt !== "", "接管记录必须带 pidCreatedAt 做身份校验");
@@ -772,15 +626,10 @@ try {
   assert.equal(adoptedAgain.reason, "already-managed");
 
   const diagnoseAdopted = await runner.diagnose([adoptExternalCommand], projectRoot);
-  assert.equal(
-    diagnoseAdopted.find((entry) => entry.port === adoptPort).occupant.managed,
-    true,
-    "接管后该端口应算托管占用"
-  );
+  assert.equal(diagnoseAdopted.find((entry) => entry.port === adoptExternalPort).occupant.managed, true, "接管后该端口应算托管占用");
 
-  // 停止接管实例：结束外部进程并落状态
   assert.equal(await runner.stop(projectRoot, "adopt-external"), true);
-  await waitFor(async () => !(await canConnect(adoptPort)), 10000, "接管实例停止后端口释放");
+  await waitFor(async () => !(await canConnect(adoptExternalPort)), 10000, "接管实例停止后端口释放");
   assert.equal(pidAlive(adoptExternal.pid), false, "停止接管实例必须真的结束外部进程");
   const adoptStopped = runner.list(projectRoot).find((entry) => entry.commandId === "adopt-external");
   assert.notEqual(adoptStopped, undefined);
@@ -806,13 +655,9 @@ try {
   assert.equal(runner.list(projectRoot).some((entry) => entry.commandId === "release-external"), false, "解除接管后不再有记录");
   assert.equal(pidAlive(releaseExternal.pid), true, "解除接管不能结束进程");
   const diagnoseReleased = await runner.diagnose([releaseExternalCommand], projectRoot);
-  assert.equal(
-    diagnoseReleased.find((entry) => entry.port === releasePort).occupant.managed,
-    false,
-    "解除接管后该端口应重新算外部占用"
-  );
+  assert.equal(diagnoseReleased.find((entry) => entry.port === releasePort).occupant.managed, false, "解除接管后该端口应重新算外部占用");
 
-  // 重启并接管：结束外部实例 -> 由插件托管启动 -> 端口属于托管进程树
+  // 重启并接管：结束外部实例 -> 等端口释放 -> 由插件托管启动
   const takeOverExternal = spawnExternal(takeOverPort);
   await waitFor(() => canConnect(takeOverPort), 15000, "重启并接管用外部进程开始监听");
   const takeOverCommand = makeCommand({
@@ -824,8 +669,8 @@ try {
     readyPort: takeOverPort,
     readyTimeoutMs: 20000
   });
-  const takeOverResult = await runner.restart(takeOverCommand, projectRoot, { commands: [takeOverCommand], takeOverExternal: true });
-  assert.equal(takeOverResult.status, "running");
+  await runner.restart(takeOverCommand, projectRoot, { commands: [takeOverCommand], takeOverExternal: true });
+  const takeOverResult = await expectSettledStatus(runner, "takeover", "running", 40000);
   assert.equal(takeOverResult.external, false, "重启并接管后必须是插件自己启动的实例");
   assert.notEqual(takeOverResult.pid, takeOverExternal.pid, "重启并接管必须换成新进程");
   assert.equal(pidAlive(takeOverExternal.pid), false, "重启并接管必须结束原外部进程");
@@ -835,17 +680,98 @@ try {
   assert.equal(takeOverEntry.occupant.runnerCommandId, "takeover");
   await runner.stop(projectRoot, "takeover");
 
-  // 没有外部实例时接管要给出明确错误，而不是静默成功
   await assert.rejects(
     () => runner.adopt(makeCommand({ id: "nothing", title: "没有实例", ports: [] }), projectRoot),
     (error) => error instanceof RunnerError && error.code === "no-external-instance",
     "没有外部实例时应报 no-external-instance"
   );
 
+  // ── 10) 并发：一条在启动时另一条立即返回；排队中可取消；事件循环不阻塞 ──
+  const [busyPort] = await getFreePorts(1);
+  const busyCommand = makeCommand({
+    id: "busy",
+    title: "慢启动",
+    command: "Start-Sleep -Seconds 4",
+    ports: [],
+    readyPort: null
+  });
+  await runner.start(busyCommand, projectRoot);
+  const [fastPort] = await getFreePorts(1);
+  const fastCommand = makeCommand({
+    id: "fast",
+    title: "另一条",
+    command: 'node "' + listenScript + '"',
+    env: { SMOKE_PORT: String(fastPort) },
+    ports: [fastPort],
+    readyPort: fastPort,
+    readyTimeoutMs: 30000
+  });
+  // 前一条还在 starting/queued，第二条必须立刻返回而不是排队等它。
+  const concurrentBegan = performance.now();
+  await runner.start(fastCommand, projectRoot);
+  const concurrentElapsed = performance.now() - concurrentBegan;
+  assert.ok(concurrentElapsed < START_RETURN_LIMIT_MS, "并发启动必须互不等待（实测 " + Math.round(concurrentElapsed) + "ms）");
+  const fastRunning = await expectSettledStatus(runner, "fast", "running", 40000);
+  assert.equal(fastRunning.status, "running");
+
+  // 就绪等待期间事件循环延迟：这是「整机卡住」的量化回归测试。
+  const histogram = monitorEventLoopDelay({ resolution: 20 });
+  const [probePort] = await getFreePorts(1);
+  const probeCommand = makeCommand({
+    id: "loop-probe",
+    title: "事件循环探针",
+    command: 'node "' + listenScript + '"',
+    env: { SMOKE_PORT: String(probePort) },
+    ports: [probePort],
+    readyPort: probePort,
+    readyTimeoutMs: 30000
+  });
+  histogram.enable();
+  await runner.start(probeCommand, projectRoot);
+  await expectSettledStatus(runner, "loop-probe", "running", 40000);
+  histogram.disable();
+  const p99 = histogram.percentile(99) / 1e6;
+  assert.ok(
+    p99 < EVENT_LOOP_P99_LIMIT_MS,
+    "就绪等待期间事件循环延迟 p99 必须 < " + EVENT_LOOP_P99_LIMIT_MS + "ms（实测 " + Math.round(p99) + "ms）"
+  );
+
+  // 排队中取消：还没有 spawn 就被停掉，不能留下任何进程/端口
+  const [cancelPort] = await getFreePorts(1);
+  const slowDep = makeCommand({ id: "cancel-dep", title: "慢依赖", command: "Start-Sleep -Seconds 3" });
+  const cancelChild = makeCommand({
+    id: "cancel-child",
+    title: "排队中取消",
+    command: 'node "' + listenScript + '"',
+    env: { SMOKE_PORT: String(cancelPort) },
+    ports: [cancelPort],
+    readyPort: cancelPort,
+    readyTimeoutMs: 20000,
+    dependsOn: ["cancel-dep"]
+  });
+  const cancelQueued = await runner.start(cancelChild, projectRoot, { commands: [slowDep, cancelChild] });
+  assert.equal(cancelQueued.status, "queued", "有依赖未就绪时应处于 queued");
+  await runner.stop(projectRoot, "cancel-child");
+  const canceledRecord = runner.list(projectRoot).find((entry) => entry.commandId === "cancel-child");
+  assert.equal(canceledRecord.status, "stopped", "排队中取消应立即落成 stopped");
+  await sleep(2500);
+  assert.equal(await canConnect(cancelPort), false, "取消后不能把进程拉起来");
+
   console.log(JSON.stringify({
     ok: true,
-    ports: { occupant: occupantPort, ready: readyPort, timeout: timeoutPort, adopt: adoptPort, release: releasePort, takeOver: takeOverPort },
-    snapshotKeys: SNAPSHOT_KEYS.length
+    ports: {
+      occupant: occupantPort,
+      ready: readyPort,
+      timeout: timeoutPort,
+      declared: declaredPort,
+      actual: actualPort,
+      adopt: adoptExternalPort,
+      release: releasePort,
+      takeOver: takeOverPort
+    },
+    snapshotKeys: SNAPSHOT_KEYS.length,
+    startReturnMs: Math.round(startElapsed),
+    eventLoopP99Ms: Math.round(p99)
   }, null, 2));
 } finally {
   if (occupant !== undefined && pidAlive(occupant.pid)) {

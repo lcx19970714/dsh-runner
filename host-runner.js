@@ -12,16 +12,16 @@
 //      校验不通过（进程没了 / pid 被复用）的记录直接丢弃，绝不误杀别的进程。
 //   5. 插件卸载不杀进程：项目级后台任务不应该因为 UI/插件重载而中断。
 //      停止只通过 stop / stopProject 显式触发。
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { accessSync, closeSync, openSync, statSync, writeSync } from "node:fs";
-import { appendFile, mkdir, open as openFile, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { statSync } from "node:fs";
+import { access, appendFile, mkdir, open as openFile, readFile, rename, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
-const STATE_VERSION = 2;
-const ACTIVE_STATUSES = new Set(["starting", "running", "stopping"]);
+const STATE_VERSION = 3;
+const ACTIVE_STATUSES = new Set(["queued", "starting", "running", "stopping"]);
 const DEFAULT_READY_TIMEOUT_MS = 120000;
 const READY_POLL_MS = 150;
 const STOP_GRACEFUL_WAIT_MS = 2000;
@@ -30,13 +30,17 @@ const ADOPTED_REFRESH_MS = 1500;
 const PORT_FALLBACK_GRACE_MS = 3000;
 /** 停止/结束后等端口真正释放的上限：Windows 上监听 socket 关闭比进程退出略晚。 */
 const PORT_RELEASE_TIMEOUT_MS = 6000;
+/** 系统探测采样 TTL：轮询/就绪等待高频请求，缓存把系统调用压到 1/TTL。 */
+const PROBE_LISTENERS_TTL_MS = 500;
+const PROBE_TREE_TTL_MS = 1000;
+const PROBE_SNAPSHOT_TTL_MS = 2000;
+const PROBE_TABLE_TTL_MS = 1000;
+const PROBE_TABLE_CACHE_MAX = 8;
 const MARKER_PREFIX = "dsh-runner-";
 const MAX_PORT = 65535;
 const LOG_DEFAULT_MAX_BYTES = 65536;
 const LOG_MIN_MAX_BYTES = 1024;
 const LOG_MAX_MAX_BYTES = 1048576;
-
-let cachedShellPath;
 
 /** 运行器结构化错误：code/details 直接被 RPC 层透传给 Client。 */
 export class RunnerError extends Error {
@@ -56,23 +60,56 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-/** 优先 pwsh，退回 Windows PowerShell；结果在进程内缓存。 */
-function resolvePowerShell() {
-  if (cachedShellPath !== undefined) return cachedShellPath;
-  try {
-    const result = spawnSync("where.exe", ["pwsh.exe"], { encoding: "utf8", windowsHide: true });
-    if (result.status === 0 && typeof result.stdout === "string") {
-      const line = result.stdout.split(/\r?\n/).map((item) => item.trim()).find((item) => item !== "");
-      if (line !== undefined) {
-        cachedShellPath = line;
-        return cachedShellPath;
+/** 深拷贝成纯 JSON：Tool 输出 / 状态快照都必须能无损 JSON 往返（undefined 会被整条判废）。 */
+function jsonClone(value) {
+  return JSON.parse(JSON.stringify(value === undefined ? null : value));
+}
+
+/**
+ * 异步子进程：Host 主线程绝不做阻塞式查询。
+ * spawnSync 会把整个 Host 事件循环（以及依赖它的整个 GUI）卡住几百毫秒，
+ * 而进程/端口探测是高频操作（状态轮询、就绪等待），必须异步。
+ * 返回 { code, stdout, stderr }；只有「进程都起不来」才 reject。
+ */
+function runCommand(file, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: options.timeoutMs === undefined ? 20000 : options.timeoutMs,
+      maxBuffer: options.maxBuffer === undefined ? 4 * 1024 * 1024 : options.maxBuffer
+    }, (error, stdout, stderr) => {
+      if (error !== null && error !== undefined && typeof error.code !== "number") {
+        reject(error);
+        return;
       }
-    }
-  } catch (error) {
-    // where.exe 不存在时退回 powershell.exe；这里不是吞错，是明确的降级路径。
+      resolve({
+        code: error !== null && error !== undefined && typeof error.code === "number" ? error.code : 0,
+        stdout: typeof stdout === "string" ? stdout : "",
+        stderr: typeof stderr === "string" ? stderr : ""
+      });
+    });
+  });
+}
+
+/** 优先 pwsh，退回 Windows PowerShell；只探测一次，结果以 Promise 缓存。 */
+let shellPathPromise;
+function resolvePowerShell() {
+  if (shellPathPromise === undefined) {
+    shellPathPromise = (async () => {
+      try {
+        const result = await runCommand("where.exe", ["pwsh.exe"], { timeoutMs: 8000 });
+        if (result.code === 0) {
+          const line = result.stdout.split(/\r?\n/).map((item) => item.trim()).find((item) => item !== "");
+          if (line !== undefined) return line;
+        }
+      } catch (error) {
+        // where.exe 不可用：下面退回 powershell.exe，这是明确的降级路径。
+      }
+      return "powershell.exe";
+    })();
   }
-  cachedShellPath = "powershell.exe";
-  return cachedShellPath;
+  return shellPathPromise;
 }
 
 function safeFilePart(value) {
@@ -187,12 +224,12 @@ async function canConnectAny(port) {
 }
 
 /** 轻量进程树：pid -> {parentPid, name}；启动轮询/所有权校验用（不取命令行/窗口）。 */
-function queryProcessTree() {
+async function queryProcessTree() {
   if (process.platform !== "win32") {
     const map = new Map();
-    const result = spawnSync("ps", ["-eo", "pid=,ppid=,comm="], { encoding: "utf8", windowsHide: true, timeout: 15000 });
-    if (result.error !== undefined && result.error !== null) throw result.error;
-    for (const line of String(result.stdout === undefined || result.stdout === null ? "" : result.stdout).split(/\r?\n/)) {
+    const result = await runCommand("ps", ["-eo", "pid=,ppid=,comm="], { timeoutMs: 15000 });
+    if (result.code !== 0) throw new Error("ps 读取进程树失败（exit " + String(result.code) + "）");
+    for (const line of result.stdout.split(/\r?\n/)) {
       const match = /^\s*(\d+)\s+(\d+)\s+(\S+)/.exec(line);
       if (match === null) continue;
       map.set(Number(match[1]), { parentPid: Number(match[2]), name: match[3] });
@@ -207,14 +244,7 @@ function queryProcessTree() {
     "$rows = foreach ($p in $procs) { [pscustomobject]@{ pid = [int]$p.ProcessId; ppid = [int]$p.ParentProcessId; name = [string]$p.Name } }",
     "ConvertTo-Json -InputObject @($rows) -Depth 3 -Compress"
   ].join("\n");
-  const result = spawnSync(resolvePowerShell(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: 20000,
-    maxBuffer: 4 * 1024 * 1024
-  });
-  if (result.error !== undefined && result.error !== null) throw result.error;
-  if (typeof result.stdout !== "string") throw new Error("无法读取 Windows 进程树");
+  const result = await runCommand(await resolvePowerShell(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], { timeoutMs: 20000 });
   const text = result.stdout.trim();
   if (text === "") throw new Error("Windows 进程树为空");
   let rows;
@@ -242,7 +272,7 @@ function queryProcessTree() {
  *   byPid:  pid  -> Set<port>
  * 只用 netstat/ss 的结果，不依赖 connect 是否成功（服务可能只绑一个地址族）。
  */
-function queryTcpListeners() {
+async function queryTcpListeners() {
   const byPort = new Map();
   const byPid = new Map();
   const add = (port, pid) => {
@@ -261,10 +291,8 @@ function queryTcpListeners() {
     ports.add(port);
   };
   if (process.platform === "win32") {
-    const result = spawnSync("netstat.exe", ["-ano"], { encoding: "utf8", windowsHide: true, timeout: 15000, maxBuffer: 4 * 1024 * 1024 });
-    if (result.error !== undefined && result.error !== null) throw result.error;
-    if (result.status !== 0) throw new Error("netstat 读取端口失败（exit " + String(result.status) + "）");
-    if (typeof result.stdout !== "string") throw new Error("netstat 没有输出");
+    const result = await runCommand("netstat.exe", ["-ano"], { timeoutMs: 15000 });
+    if (result.code !== 0) throw new Error("netstat 读取端口失败（exit " + String(result.code) + "）");
     for (const line of result.stdout.split(/\r?\n/)) {
       const parts = line.trim().split(/\s+/);
       if (parts.length !== 5) continue;
@@ -275,9 +303,8 @@ function queryTcpListeners() {
     }
     return { byPort: byPort, byPid: byPid };
   }
-  const result = spawnSync("ss", ["-ltnpH"], { encoding: "utf8", windowsHide: true, timeout: 15000 });
-  if (result.error !== undefined && result.error !== null) throw result.error;
-  for (const line of String(result.stdout === undefined || result.stdout === null ? "" : result.stdout).split(/\r?\n/)) {
+  const result = await runCommand("ss", ["-ltnpH"], { timeoutMs: 15000 });
+  for (const line of result.stdout.split(/\r?\n/)) {
     const parts = line.trim().split(/\s+/);
     if (parts.length < 4) continue;
     const separator = parts[3].lastIndexOf(":");
@@ -346,7 +373,7 @@ function markOccupantRelated(occupant, projectPath, cwd) {
  * createdAt 用于「外部接管」的身份校验（pid 会被复用，创建时间不会）。
  * 进程不存在时不会出现在结果里；读取失败时抛错（调用方必须保守处理）。
  */
-function queryProcessTable(pids) {
+async function queryProcessTable(pids) {
   const ids = Array.from(new Set(pids.filter((pid) => typeof pid === "number" && Number.isFinite(pid) && pid > 0)));
   if (ids.length === 0) return new Map();
   if (process.platform !== "win32") {
@@ -365,13 +392,7 @@ function queryProcessTable(pids) {
   // createdAt 必须排在 commandLine 之前：命令行里可能有 "|"，创建时间是固定格式不会有。
   const script = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; "
     + "Get-CimInstance Win32_Process -Filter \"" + filter + "\" | ForEach-Object { \"$($_.ProcessId)|$($_.Name)|$(if ($_.CreationDate) { $_.CreationDate.ToString('o') } else { '' })|$($_.CommandLine)\" }";
-  const result = spawnSync(resolvePowerShell(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: 15000
-  });
-  if (result.error !== undefined && result.error !== null) throw result.error;
-  if (typeof result.stdout !== "string") throw new Error("无法读取 Windows 进程表");
+  const result = await runCommand(await resolvePowerShell(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], { timeoutMs: 15000 });
   const map = new Map();
   for (const line of result.stdout.split(/\r?\n/)) {
     const first = line.indexOf("|");
@@ -397,12 +418,12 @@ function queryProcessTable(pids) {
  * 窗口标题取自主窗口（MainWindowTitle）：Electron/IDE 这类应用足以让用户认出是哪个程序；
  * 纯控制台进程通常没有主窗口，windowTitle 为空。
  */
-function queryProcessSnapshot() {
+async function queryProcessSnapshot() {
   if (process.platform !== "win32") {
     const map = new Map();
-    const result = spawnSync("ps", ["-eo", "pid=,ppid=,comm=,args="], { encoding: "utf8", windowsHide: true, timeout: 15000 });
-    if (result.error !== undefined && result.error !== null) throw result.error;
-    for (const line of String(result.stdout === undefined || result.stdout === null ? "" : result.stdout).split(/\r?\n/)) {
+    const result = await runCommand("ps", ["-eo", "pid=,ppid=,comm=,args="], { timeoutMs: 15000 });
+    if (result.code !== 0) throw new Error("ps 读取进程表失败（exit " + String(result.code) + "）");
+    for (const line of result.stdout.split(/\r?\n/)) {
       const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s*(.*)$/.exec(line);
       if (match === null) continue;
       map.set(Number(match[1]), {
@@ -440,14 +461,7 @@ function queryProcessSnapshot() {
     "}",
     "ConvertTo-Json -InputObject @($rows) -Depth 3 -Compress"
   ].join("\n");
-  const result = spawnSync(resolvePowerShell(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: 20000,
-    maxBuffer: 8 * 1024 * 1024
-  });
-  if (result.error !== undefined && result.error !== null) throw result.error;
-  if (typeof result.stdout !== "string") throw new Error("无法读取 Windows 进程表");
+  const result = await runCommand(await resolvePowerShell(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], { timeoutMs: 20000, maxBuffer: 8 * 1024 * 1024 });
   const text = result.stdout.trim();
   if (text === "") throw new Error("Windows 进程表为空");
   let rows;
@@ -473,6 +487,118 @@ function queryProcessSnapshot() {
   }
   return map;
 }
+
+/**
+ * 系统探测采样器：所有进程/端口查询都必须走这里。
+ * - 单飞（single-flight）：同类查询并发时只跑一次，其余等同一个 Promise；
+ * - TTL 缓存：状态轮询 + 就绪等待会高频请求，缓存把系统调用压到 1/TTL；
+ * - 全异步：宿主主线程永不被阻塞（这是「点一下运行整机卡住」的根因修复）。
+ */
+class SystemProbe {
+  constructor() {
+    this.cache = new Map();
+    // 每次 invalidate/fresh 递增：更早的在飞采样不允许回写缓存（否则会覆盖掉新读数）。
+    this.epoch = 0;
+  }
+
+  /** 只用于观测：TTL 内直接返回缓存，同类并发共用一次采样。 */
+  read(kind, ttlMs, loader) {
+    const entry = this.cache.get(kind);
+    if (entry !== undefined && entry.inflight !== null) return entry.inflight;
+    if (entry !== undefined && entry.value !== undefined && Date.now() - entry.at < ttlMs) {
+      return Promise.resolve(entry.value);
+    }
+    return this.load(kind, loader);
+  }
+
+  load(kind, loader) {
+    const epoch = this.epoch;
+    const entry = { at: 0, value: undefined, inflight: null };
+    const inflight = loader().then((value) => {
+      if (this.epoch === epoch) {
+        this.cache.set(kind, { at: Date.now(), value: value, inflight: null });
+      } else if (this.cache.get(kind) === entry) {
+        // 采样期间被 fresh/invalidate 作废：不能留下「永远返回这一次旧值」的冻结条目。
+        this.cache.delete(kind);
+      }
+      return value;
+    }, (error) => {
+      if (this.cache.get(kind) === entry) this.cache.delete(kind);
+      throw error;
+    });
+    entry.inflight = inflight;
+    this.cache.set(kind, entry);
+    return inflight;
+  }
+
+  /** 决策路径（要不要杀 / 能不能启动）：绕过缓存立刻重采样，并作废所有在飞采样。 */
+  fresh(kind, loader) {
+    this.epoch += 1;
+    this.cache.delete(kind);
+    return this.load(kind, loader);
+  }
+
+  listeners() {
+    return this.read("listeners", PROBE_LISTENERS_TTL_MS, queryTcpListeners);
+  }
+
+  listenersFresh() {
+    return this.fresh("listeners", queryTcpListeners);
+  }
+
+  tree() {
+    return this.read("tree", PROBE_TREE_TTL_MS, queryProcessTree);
+  }
+
+  treeFresh() {
+    return this.fresh("tree", queryProcessTree);
+  }
+
+  snapshot() {
+    return this.read("snapshot", PROBE_SNAPSHOT_TTL_MS, queryProcessSnapshot);
+  }
+
+  snapshotFresh() {
+    return this.fresh("snapshot", queryProcessSnapshot);
+  }
+
+  async table(pids) {
+    const ids = normalizePidList(pids);
+    if (ids.length === 0) return new Map();
+    const value = await this.read("table:" + ids.join(","), PROBE_TABLE_TTL_MS, () => queryProcessTable(ids));
+    this.evictTables("table:" + ids.join(","));
+    return value;
+  }
+
+  async tableFresh(pids) {
+    const ids = normalizePidList(pids);
+    if (ids.length === 0) return new Map();
+    const kind = "table:" + ids.join(",");
+    const value = await this.fresh(kind, () => queryProcessTable(ids));
+    this.evictTables(kind);
+    return value;
+  }
+
+  evictTables(keep) {
+    for (const key of this.cache.keys()) {
+      if (this.cache.size <= PROBE_TABLE_CACHE_MAX) break;
+      if (key.indexOf("table:") !== 0 || key === keep) continue;
+      this.cache.delete(key);
+    }
+  }
+
+  /** 有进程被结束/启动后调用：下一次读取必须拿到新结果，不能吃旧缓存。 */
+  invalidate() {
+    this.epoch += 1;
+    this.cache.clear();
+  }
+}
+
+function normalizePidList(pids) {
+  return Array.from(new Set((Array.isArray(pids) ? pids : []).filter((pid) => Number.isInteger(pid) && pid > 0))).sort((left, right) => left - right);
+}
+
+const probe = new SystemProbe();
 
 /**
  * 把一个 pid 描述成用户可读的占用者：
@@ -637,6 +763,8 @@ export class ProjectRunnerService {
     this.persistQueue = Promise.resolve();
     this.initPromise = null;
     this.lastRefreshAt = 0;
+    // 系统探测采样器：异步 + 单飞 + TTL，所有进程/端口查询的唯一入口。
+    this.probe = probe;
   }
 
   key(projectPath, commandId) {
@@ -658,7 +786,7 @@ export class ProjectRunnerService {
     }
     let table;
     try {
-      table = queryProcessTable(candidates.map((entry) => entry.pid));
+      table = await this.probe.table(candidates.map((entry) => entry.pid));
     } catch (error) {
       // 读不到进程表时保守处理：不接管、不改写 state 文件（留待下次启动再试）。
       this.reportError("无法校验上次的后台进程，跳过接管", error);
@@ -707,7 +835,9 @@ export class ProjectRunnerService {
         external: entry.external === true,
         child: null,
         treePids: Array.isArray(entry.treePids) ? entry.treePids.filter((pid) => Number.isInteger(pid)) : [],
-        finished: false
+        finished: false,
+        error: null,
+        flow: null
       });
     }
 
@@ -717,7 +847,7 @@ export class ProjectRunnerService {
     if (withTree.length > 0) {
       let snapshot;
       try {
-        snapshot = queryProcessSnapshot();
+        snapshot = await this.probe.snapshot();
       } catch (error) {
         this.reportError("无法读取进程表，跳过上次残留清理", error);
       }
@@ -730,7 +860,7 @@ export class ProjectRunnerService {
             if (info === undefined) continue;
             const created = typeof info.createdAt === "string" ? Date.parse(info.createdAt) : Number.NaN;
             if (Number.isFinite(created) && startedAt > 0 && created + 2000 < startedAt) continue;
-            this.killProcess(pid, true);
+            await this.killProcess(pid, true);
           }
         }
       }
@@ -766,8 +896,8 @@ export class ProjectRunnerService {
     let listeners;
     let tree;
     try {
-      listeners = queryTcpListeners();
-      tree = queryProcessTree();
+      listeners = await this.probe.listeners();
+      tree = await this.probe.tree();
     } catch (error) {
       this.reportError("无法刷新进程与端口状态", error);
       return;
@@ -789,7 +919,7 @@ export class ProjectRunnerService {
     if (adopted.length === 0) return;
     let table;
     try {
-      table = queryProcessTable(adopted.map((record) => record.pid));
+      table = await this.probe.table(adopted.map((record) => record.pid));
     } catch (error) {
       this.reportError("无法校验接管进程状态", error);
       return;
@@ -813,7 +943,15 @@ export class ProjectRunnerService {
   }
 
   /**
-   * 启动命令；dependsOn 会先递归启动（每个依赖都等到 running/ready）。
+   * 启动命令：**命令即返回**（这是交互丝滑的前提）。
+   *
+   * 第一性原理：RPC 只负责「改变状态」，不负责「等结果」。
+   * - 立即建一条 queued 记录并返回 snapshot；依赖解析、端口预检、spawn、端口契约等待
+   *   全部放进后台 flow，请求不再被启动耗时时长绑住；
+   * - 同一命令全局面只有一个 flow（去重），重复点击/依赖交叉都收敛到同一条记录；
+   * - 运行期失败（依赖失败/工作目录缺失/端口被占/端口降级/就绪超时）写成
+   *   record.error + status:"failed"，UI 从状态轮询里读——不再靠 RPC 抛异常，
+   *   否则请求就得挂到启动结束。
    * options.commands 是完整命令列表（用于解析依赖）。
    */
   async start(command, projectPath, options = {}) {
@@ -824,161 +962,204 @@ export class ProjectRunnerService {
       throw new RunnerError("bad-request", "项目级运行需要项目路径", {});
     }
     await this.init();
-    const commands = Array.isArray(options.commands) ? options.commands : [];
-    return this.startWithDependencies(command, projectPath.trim(), commands, new Set());
+    const workspace = projectPath.trim();
+    const key = this.key(workspace, command.id);
+    const existing = this.records.get(key);
+    if (isActive(existing)) return this.snapshot(existing);
+
+    const record = this.createQueuedRecord(command, workspace);
+    this.records.set(key, record);
+    await this.persist();
+    this.driveStart(record, command, Array.isArray(options.commands) ? options.commands : []);
+    return this.snapshot(record);
   }
 
-  async startWithDependencies(command, projectPath, commands, chain) {
-    if (chain.has(command.id)) {
-      throw new RunnerError(
-        "dependency-failed",
-        "dependsOn 存在环：" + Array.from(chain).concat([command.id]).join(" -> "),
-        { commandId: command.id }
-      );
-    }
-    chain.add(command.id);
-    try {
-      const dependencies = Array.isArray(command.dependsOn) ? command.dependsOn : [];
-      for (const dependencyId of dependencies) {
-        const dependency = commands.find((item) => item !== null && typeof item === "object" && item.id === dependencyId);
-        try {
-          if (dependency === undefined) throw new Error("依赖命令不存在或不在当前配置里");
-          await this.ensureDependency(dependency, projectPath, commands, chain);
-        } catch (error) {
-          throw new RunnerError(
-            "dependency-failed",
-            "依赖「" + (dependency === undefined ? dependencyId : dependency.title) + "」启动失败：" + messageOf(error),
-            { commandId: dependencyId, message: messageOf(error) }
-          );
-        }
-      }
-      return await this.startCommand(command, projectPath);
-    } finally {
-      chain.delete(command.id);
-    }
-  }
-
-  async ensureDependency(dependency, projectPath, commands, chain) {
-    if (dependency.enabled === false) throw new Error("依赖命令已停用");
-    const record = this.records.get(this.key(projectPath, dependency.id));
-    if (record !== undefined && isActive(record)) {
-      if (record.status === "running") return;
-      if (record.status === "starting") {
-        const timeout = (Number.isInteger(record.readyTimeoutMs) ? record.readyTimeoutMs : DEFAULT_READY_TIMEOUT_MS) + 5000;
-        if (await this.waitForRunning(record, timeout)) return;
-        throw new Error("依赖命令未在超时内就绪（状态 " + record.status + "）");
-      }
-      // stopping：等它停完再重新启动。
-      await this.waitExit(record, STOP_TIMEOUT_MS + 1000);
-      if (isActive(record)) throw new Error("依赖命令仍在停止中");
-    }
-    const started = await this.startWithDependencies(dependency, projectPath, commands, chain);
-    if (started.status !== "running") throw new Error("依赖命令启动后状态为 " + started.status);
-  }
-
-  async waitForRunning(record, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (!isActive(record)) return false;
-      if (record.status === "running") return true;
-      await sleep(100);
-    }
-    return record.status === "running";
-  }
-
-  async startCommand(command, projectPath) {
-    const key = this.key(projectPath, command.id);
-    const previous = this.records.get(key);
-    if (previous !== undefined && isActive(previous)) {
-      if (previous.status !== "stopping") return this.snapshot(previous);
-      await this.waitExit(previous, STOP_TIMEOUT_MS + 1000);
-      if (isActive(previous)) throw new RunnerError("internal", "上一个进程仍在停止中，请稍后再试", { commandId: command.id });
-    }
-
-    const effectiveCwd = this.effectiveCwd(command, projectPath);
-    try {
-      accessSync(effectiveCwd);
-    } catch (error) {
-      throw new RunnerError("spawn-failed", "工作目录不存在：" + effectiveCwd, { cwd: effectiveCwd });
-    }
-
-    await this.assertPortsFree(command);
-
-    const dir = path.join(this.logDir, projectHash(projectPath));
-    await mkdir(dir, { recursive: true });
-    const logPath = path.join(dir, safeFilePart(command.id) + ".log");
-    const marker = createMarker(key);
-    const shell = resolvePowerShell();
-    const env = Object.assign({}, process.env, isPlainObject(command.env) ? command.env : {});
+  /** 建一条「排队中」记录：还没有进程，只有身份、端口契约和日志位置。 */
+  createQueuedRecord(command, workspace) {
+    const key = this.key(workspace, command.id);
     const ports = Array.isArray(command.ports) ? command.ports.filter((port) => Number.isInteger(port)) : [];
-    const readyPort = Number.isInteger(command.readyPort) ? command.readyPort : null;
-    const readyTimeoutMs = Number.isInteger(command.readyTimeoutMs) ? command.readyTimeoutMs : DEFAULT_READY_TIMEOUT_MS;
-    const logFd = openSync(logPath, "a");
-    let child;
-    try {
-      writeSync(logFd, "\r\n[dsh-runner] " + new Date().toLocaleString() + " 启动：" + command.title + "（" + projectPath + "）\r\n");
-      child = spawn(shell, ["-NoLogo", "-NoProfile", "-Command", buildCommandText(command, effectiveCwd, marker)], {
-        cwd: effectiveCwd,
-        env: env,
-        windowsHide: true,
-        stdio: ["ignore", logFd, logFd]
-      });
-    } catch (error) {
-      throw new RunnerError("spawn-failed", "启动进程失败：" + messageOf(error), {});
-    } finally {
-      closeSync(logFd);
-    }
-
-    const record = {
+    return {
       key: key,
-      projectPath: projectPath,
+      projectPath: workspace,
       commandId: command.id,
-      title: command.title,
-      command: command.command,
-      cwd: effectiveCwd,
+      title: typeof command.title === "string" && command.title !== "" ? command.title : String(command.id),
+      command: typeof command.command === "string" ? command.command : "",
+      cwd: this.effectiveCwd(command, workspace),
       ports: ports,
-      readyPort: readyPort,
-      readyTimeoutMs: readyTimeoutMs,
-      logPath: logPath,
-      marker: marker,
-      pid: child.pid,
+      readyPort: Number.isInteger(command.readyPort) ? command.readyPort : null,
+      readyTimeoutMs: Number.isInteger(command.readyTimeoutMs) ? command.readyTimeoutMs : DEFAULT_READY_TIMEOUT_MS,
+      logPath: this.logPathFor(workspace, command.id),
+      marker: createMarker(key),
+      pid: null,
       startedAt: Date.now(),
-      status: "starting",
+      status: "queued",
       ready: ports.length === 0 ? null : false,
       actualPorts: [],
       exitCode: undefined,
       stopRequested: false,
       adopted: false,
-      child: child,
-      finished: false
+      external: false,
+      child: null,
+      treePids: [],
+      finished: false,
+      error: null,
+      flow: null,
+      exited: null,
+      resolveExited: null
     };
+  }
+
+  /**
+   * 后台启动流程（不阻塞任何请求）：依赖 -> 端口预检 -> spawn -> 就绪契约。
+   * 失败一律落到 record.error，不向调用方抛（调用方早就返回了）。
+   */
+  driveStart(record, command, commands) {
+    if (record.flow !== null && record.flow !== undefined) return record.flow;
+    const flow = this.runStartFlow(record, command, commands)
+      .catch((error) => this.failRecord(record, error))
+      .finally(() => { record.flow = null; });
+    record.flow = flow;
+    return flow;
+  }
+
+  async runStartFlow(record, command, commands) {
+    await this.ensureDependencies(record, command, commands);
+    if (!isActive(record)) return;
+    if (!(await this.spawnRecord(record, command))) return;
+    await this.awaitReady(record);
+  }
+
+  async ensureDependencies(record, command, commands) {
+    for (const dependencyId of Array.isArray(command.dependsOn) ? command.dependsOn : []) {
+      const dependency = commands.find((item) => item !== null && typeof item === "object" && item.id === dependencyId);
+      if (dependency === undefined) {
+        throw new RunnerError("dependency-failed", "依赖「" + dependencyId + "」不存在或不在当前配置里", { commandId: dependencyId });
+      }
+      if (dependency.enabled === false) {
+        throw new RunnerError("dependency-failed", "依赖「" + dependency.title + "」已停用", { commandId: dependencyId });
+      }
+      await this.ensureDependencyReady(dependency, record.projectPath, commands, new Set([command.id]));
+      if (!isActive(record)) return;
+    }
+  }
+
+  /** 依赖必须先 running；没有就入队，并等它的 flow 落定（同一命令全局面只有一个 flow）。 */
+  async ensureDependencyReady(dependency, projectPath, commands, chain) {
+    if (chain.has(dependency.id)) {
+      throw new RunnerError(
+        "dependency-failed",
+        "dependsOn 存在环：" + Array.from(chain).concat([dependency.id]).join(" -> "),
+        { commandId: dependency.id }
+      );
+    }
+    chain.add(dependency.id);
+    try {
+      const key = this.key(projectPath, dependency.id);
+      let record = this.records.get(key);
+      if (record !== undefined && isActive(record) && record.status === "stopping") {
+        await this.waitExit(record, STOP_TIMEOUT_MS + 1000);
+        record = this.records.get(key);
+      }
+      if (record === undefined || !isActive(record)) {
+        await this.start(dependency, projectPath, { commands: commands });
+        record = this.records.get(key);
+      }
+      if (record === undefined) {
+        throw new RunnerError("dependency-failed", "依赖「" + dependency.title + "」没有建立运行记录", { commandId: dependency.id });
+      }
+      const flow = record.flow;
+      if (flow !== null && flow !== undefined) await flow;
+      if (record.status !== "running") {
+        const failure = record.error !== null && record.error !== undefined ? record.error : null;
+        throw new RunnerError(
+          "dependency-failed",
+          "依赖「" + dependency.title + "」未就绪（状态 " + record.status + "）"
+            + (failure !== null && typeof failure.message === "string" ? "：" + failure.message : ""),
+          { commandId: dependency.id, status: record.status }
+        );
+      }
+    } finally {
+      chain.delete(dependency.id);
+    }
+  }
+
+  /**
+   * 端口预检 + spawn。返回 false 表示记录在排队/预检期间被取消（不再 spawn）。
+   * 预检/工作目录/spawn 失败抛 RunnerError，由 driveStart 落成 record.error。
+   */
+  async spawnRecord(record, command) {
+    if (!isActive(record)) return false;
+    try {
+      await access(record.cwd);
+    } catch (error) {
+      throw new RunnerError("spawn-failed", "工作目录不存在：" + record.cwd, { cwd: record.cwd });
+    }
+    await this.assertPortsFree(command);
+    if (!isActive(record)) return false;
+
+    await mkdir(path.dirname(record.logPath), { recursive: true });
+    const logHandle = await openFile(record.logPath, "a");
+    let child;
+    try {
+      await logHandle.write("\r\n[dsh-runner] " + new Date().toLocaleString() + " 启动：" + record.title + "（" + record.projectPath + "）\r\n");
+      if (!isActive(record)) return false;
+      const shell = await resolvePowerShell();
+      const env = Object.assign({}, process.env, isPlainObject(command.env) ? command.env : {});
+      child = spawn(shell, ["-NoLogo", "-NoProfile", "-Command", buildCommandText(command, record.cwd, record.marker)], {
+        cwd: record.cwd,
+        env: env,
+        windowsHide: true,
+        stdio: ["ignore", logHandle.fd, logHandle.fd]
+      });
+    } catch (error) {
+      if (error instanceof RunnerError) throw error;
+      throw new RunnerError("spawn-failed", "启动进程失败：" + messageOf(error), {});
+    } finally {
+      await logHandle.close();
+    }
+
+    record.pid = typeof child.pid === "number" ? child.pid : null;
+    record.status = "starting";
+    record.error = null;
+    record.child = child;
+    record.startedAt = Date.now();
     record.exited = new Promise((resolve) => {
       record.resolveExited = resolve;
     });
-    this.records.set(key, record);
-
     child.on("error", (error) => {
-      void this.finish(record, "failed", undefined, undefined, "启动失败：" + messageOf(error));
+      void this.finish(record, "failed", undefined, undefined, "启动失败：" + messageOf(error), {
+        code: "spawn-failed",
+        message: messageOf(error),
+        details: {}
+      });
     });
     child.on("exit", (code, signal) => {
       const exitCode = typeof code === "number" ? code : undefined;
       const status = record.stopRequested === true ? "stopped" : (record.status === "starting" ? "failed" : "exited");
       void this.finish(record, status, exitCode, signal === undefined || signal === null ? undefined : signal);
     });
-
     await this.persist();
+    if (!isActive(record)) {
+      // spawn 期间被点了「停止」：不留一个不受管的进程。
+      await this.killProcess(record.pid, true);
+      return false;
+    }
+    return true;
+  }
 
-    // 端口契约：声明了 ports，就必须由「本次启动的进程树」持有；声明了 readyPort 还要可连接。
-    // 未声明任何端口 = 没有契约，直接 running；实际端口由 refresh() 观测。
-    if (ports.length === 0) {
+  /** 就绪契约：声明端口必须由本次启动的进程树持有（readyPort 还要求可连接）。 */
+  async awaitReady(record) {
+    // 没有声明端口 = 没有契约：spawn 成功即视为运行中。
+    if (record.ports.length === 0) {
       if (record.status === "starting") {
         record.status = "running";
         await this.persist();
       }
-      return this.snapshot(record);
+      return;
     }
-
     const contract = await this.waitForPortContract(record);
+    // 进程已退出/被停止：finish() 已经落过状态，这里不再覆盖。
+    if (contract.status === "aborted") return;
     if (contract.status === "ready") {
       if (record.status === "starting") {
         record.status = "running";
@@ -986,16 +1167,8 @@ export class ProjectRunnerService {
         record.actualPorts = contract.actualPorts;
         await this.persist();
       }
-      return this.snapshot(record);
+      return;
     }
-    if (contract.status === "aborted") {
-      throw new RunnerError(
-        "spawn-failed",
-        "命令在端口就绪前退出" + (record.exitCode === undefined ? "" : "（code=" + String(record.exitCode) + "）"),
-        { ports: ports, exitCode: record.exitCode }
-      );
-    }
-
     const actualText = contract.actualPorts.length === 0
       ? "未监听任何端口"
       : contract.actualPorts.map((port) => String(port)).join("、");
@@ -1005,22 +1178,58 @@ export class ProjectRunnerService {
         ? "；占用者：" + occupantText(first.occupant)
         : "";
       const targetText = contract.conflicts.length === 0
-        ? ports.map((port) => String(port)).join("、")
+        ? record.ports.map((port) => String(port)).join("、")
         : contract.conflicts.map((item) => String(item.port)).join("、");
-      await this.failSpawned(record, "声明端口 " + targetText + " 未由本进程监听（实际：" + actualText + "），已结束本次启动");
       throw new RunnerError(
         "port-mismatch",
         "本命令未绑定声明端口 " + targetText + "（实际：" + actualText + "）" + ownerText + "，已终止本次启动",
         { ports: contract.conflicts, actualPorts: contract.actualPorts }
       );
     }
-
-    await this.failSpawned(record, "声明端口 " + ports.map((port) => String(port)).join("、") + " 在 " + String(record.readyTimeoutMs) + "ms 内未由本进程监听，已结束本次启动");
     throw new RunnerError(
       "ready-timeout",
-      "端口 " + ports.map((port) => String(port)).join("、") + " 在 " + String(record.readyTimeoutMs) + "ms 内未就绪",
-      { ports: ports, timeoutMs: record.readyTimeoutMs }
+      "端口 " + record.ports.map((port) => String(port)).join("、") + " 在 " + String(record.readyTimeoutMs) + "ms 内未就绪",
+      { ports: record.ports, timeoutMs: record.readyTimeoutMs }
     );
+  }
+
+  /** 运行期失败统一落账：error + failed + 收掉本次进程树 + 落盘。 */
+  async failRecord(record, error) {
+    if (record === undefined || record === null) return null;
+    const code = error instanceof RunnerError ? error.code : "internal";
+    const message = messageOf(error);
+    record.error = {
+      code: code,
+      message: message,
+      details: error instanceof RunnerError && isPlainObject(error.details) ? error.details : {}
+    };
+    if (typeof record.pid === "number" && record.pid > 0) {
+      await this.killProcess(record.pid, true);
+      await this.waitExit(record, STOP_TIMEOUT_MS);
+    }
+    if (record.finished !== true) {
+      await this.finish(record, "failed", record.exitCode, undefined, "启动失败：" + message);
+    } else {
+      await this.persist();
+    }
+    return this.snapshot(record);
+  }
+
+  /**
+   * 等一条命令「有结论」：running / failed / stopped / exited，或超时。
+   * 只轮询内存里的状态，不阻塞事件循环。AI Tool 用它把「命令即返回」包回同步语义，
+   * UI 不需要（UI 由状态轮询 + 交互驱动）。
+   */
+  async settle(projectPath, commandId, timeoutMs) {
+    const key = this.key(projectPath, commandId);
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (true) {
+      const record = this.records.get(key);
+      if (record === undefined) return null;
+      if (!isActive(record) || record.status === "running") return this.snapshot(record);
+      if (Date.now() >= deadline) return this.snapshot(record);
+      await sleep(120);
+    }
   }
 
   /**
@@ -1041,8 +1250,8 @@ export class ProjectRunnerService {
       let listeners;
       let tree;
       try {
-        listeners = queryTcpListeners();
-        tree = queryProcessTree();
+        listeners = await this.probe.listeners();
+        tree = await this.probe.tree();
       } catch (error) {
         // 校验依赖系统进程/端口表；读不到就继续重试，超时后按 ready-timeout 失败，绝不当作成功。
         await sleep(READY_POLL_MS);
@@ -1091,7 +1300,7 @@ export class ProjectRunnerService {
   async describePortConflicts(declared, actual, listeners, record) {
     let snapshot = null;
     try {
-      snapshot = queryProcessSnapshot();
+      snapshot = await this.probe.snapshotFresh();
     } catch (error) {
       this.reportError("无法读取端口占用者详情", error);
     }
@@ -1118,20 +1327,6 @@ export class ProjectRunnerService {
     return conflicts;
   }
 
-  /** 启动失败时终止本次 spawn 的进程树，并记录原因。 */
-  async failSpawned(record, note) {
-    if (typeof record.pid === "number" && Number.isFinite(record.pid) && record.pid > 0) {
-      this.killProcess(record.pid, false);
-      if (!(await this.waitExit(record, STOP_GRACEFUL_WAIT_MS))) this.killProcess(record.pid, true);
-      await this.waitExit(record, STOP_TIMEOUT_MS);
-    }
-    if (record.finished !== true) {
-      await this.finish(record, "failed", record.exitCode, undefined, note);
-    } else {
-      await appendLogLine(record.logPath, "\r\n[dsh-runner] " + note + "\r\n");
-    }
-  }
-
   effectiveCwd(command, projectPath) {
     const cwd = typeof command.cwd === "string" ? command.cwd.trim() : "";
     if (cwd !== "") return cwd;
@@ -1146,12 +1341,12 @@ export class ProjectRunnerService {
   async assertPortsFree(command) {
     const ports = Array.isArray(command.ports) ? command.ports.filter((port) => Number.isInteger(port)) : [];
     if (ports.length === 0) return;
-    const listeners = queryTcpListeners();
+    const listeners = await this.probe.listenersFresh();
     const occupiedPorts = ports.filter((port) => listeners.byPort.has(port));
     if (occupiedPorts.length === 0) return;
     let snapshot;
     try {
-      snapshot = queryProcessSnapshot();
+      snapshot = await this.probe.snapshot();
     } catch (error) {
       throw new RunnerError(
         "internal",
@@ -1183,6 +1378,10 @@ export class ProjectRunnerService {
   }
 
   /** 停止一个项目命令；返回前状态一定已经离开 running/stopping 并已落盘。 */
+  /**
+   * 停止一条命令。排队中（还没 spawn）也能停：状态立刻变 stopping，
+   * flow 在下一个检查点看到「已不活跃」会自行退出，不会把进程拉起来。
+   */
   async stop(projectPath, commandId) {
     const record = this.records.get(this.key(projectPath, commandId));
     if (!isActive(record)) return false;
@@ -1194,17 +1393,20 @@ export class ProjectRunnerService {
     return true;
   }
 
+  /** 停一批命令：并行执行（每条都是异步 taskkill，串行会让 N 条命令耗时相加）。 */
   async stopProject(projectPath) {
     const targets = [];
     for (const record of this.records.values()) {
       if (isActive(record) && samePath(record.projectPath, projectPath)) targets.push(record);
     }
-    let stopped = 0;
-    for (const record of targets) {
+    const results = await Promise.all(targets.map((record) => {
       // 用 record 自己的 projectPath 建 key，避免调用方路径写法不同导致停不掉。
-      if (await this.stop(record.projectPath, record.commandId)) stopped += 1;
-    }
-    return stopped;
+      return this.stop(record.projectPath, record.commandId).catch((error) => {
+        this.reportError("停止「" + record.title + "」失败", error);
+        return false;
+      });
+    }));
+    return results.filter((value) => value === true).length;
   }
 
   /**
@@ -1233,7 +1435,7 @@ export class ProjectRunnerService {
     while (Date.now() < deadline) {
       let listeners;
       try {
-        listeners = queryTcpListeners();
+        listeners = await this.probe.listenersFresh();
       } catch (error) {
         this.reportError("无法读取端口监听表", error);
         return false;
@@ -1244,7 +1446,10 @@ export class ProjectRunnerService {
     return true;
   }
 
-  /** 按依赖拓扑序启动项目内所有 enabled 命令；单个失败不中断后续。 */
+  /**
+   * 按依赖拓扑序「全部入队」：每条只建立 queued 记录就返回，依赖由各自的 flow 推进。
+   * 返回的 queued 是本次入队的全部命令 id（已运行中的也包含在内，状态以 runners 为准）。
+   */
   async startAll(commands, projectPath) {
     await this.init();
     if (!Array.isArray(commands)) throw new RunnerError("bad-request", "startAll 需要命令列表", {});
@@ -1259,24 +1464,12 @@ export class ProjectRunnerService {
         && commandMatchesProject(command, workspace);
     });
     const order = orderCommandsByDependencies(selected, commands);
-    const started = [];
-    const failed = [];
+    const queued = [];
     for (const command of order) {
-      try {
-        await this.start(command, workspace, { commands: commands });
-        started.push(command.id);
-      } catch (error) {
-        failed.push({
-          commandId: command.id,
-          title: command.title,
-          code: error instanceof RunnerError ? error.code : "internal",
-          message: messageOf(error),
-          // 必须是 JSON 可表示的值：undefined 会让 AI Tool 的 lossless JSON 校验直接失败。
-          details: error instanceof RunnerError ? error.details : {}
-        });
-      }
+      await this.start(command, workspace, { commands: commands });
+      queued.push(command.id);
     }
-    return { started: started, failed: failed, runners: this.list(workspace) };
+    return { queued: queued, runners: this.list(workspace) };
   }
 
   /** 端口诊断：项目内每条命令的每个 ports 端口一项，附带占用者完整信息与托管归属。 */
@@ -1316,16 +1509,16 @@ export class ProjectRunnerService {
       portTargets.push({ command: command, projectPath: targetPath });
     }
 
-    const listeners = queryTcpListeners();
+    const listeners = await this.probe.listeners();
     let snapshot;
     try {
-      snapshot = queryProcessSnapshot();
+      snapshot = await this.probe.snapshot();
     } catch (error) {
       throw new RunnerError("internal", "无法读取进程表：" + messageOf(error), {});
     }
     const managedPids = new Set();
     try {
-      const tree = queryProcessTree();
+      const tree = await this.probe.tree();
       for (const record of this.records.values()) {
         if (!isActive(record) || typeof record.pid !== "number") continue;
         for (const pid of collectTreePids(record.pid, tree)) managedPids.add(pid);
@@ -1407,13 +1600,13 @@ export class ProjectRunnerService {
     if (expectedPid !== undefined && expectedPid !== null && (!Number.isInteger(expectedPid) || expectedPid <= 0)) {
       throw new RunnerError("bad-request", "pid 必须是正整数", { pid: expectedPid });
     }
-    const listeners = queryTcpListeners();
+    const listeners = await this.probe.listenersFresh();
     const owners = listeners.byPort.get(port);
     if (owners === undefined) return { killed: false };
     const pid = [...owners][0];
     let snapshot;
     try {
-      snapshot = queryProcessSnapshot();
+      snapshot = await this.probe.snapshot();
     } catch (error) {
       throw new RunnerError("internal", "无法读取进程表：" + messageOf(error), { port: port });
     }
@@ -1439,10 +1632,11 @@ export class ProjectRunnerService {
         { port: port, occupant: occupant, runnerCommandId: managed.runnerCommandId }
       );
     }
-    this.killProcess(pid, true);
+    await this.killProcess(pid, true);
     const deadline = Date.now() + 3000;
     while (Date.now() < deadline) {
-      if (!queryTcpListeners().byPort.has(port)) return { killed: true, pid: pid, occupant: occupant };
+      const listeners = await this.probe.listenersFresh();
+      if (!listeners.byPort.has(port)) return { killed: true, pid: pid, occupant: occupant };
       await sleep(150);
     }
     throw new RunnerError("kill-failed", "无法结束占用端口 " + String(port) + " 的进程 " + String(pid), { port: port, pid: pid, occupant: occupant });
@@ -1454,15 +1648,15 @@ export class ProjectRunnerService {
    *   2) 可执行文件位于命令 cwd 之下、且没有声明端口的进程（Tauri 客户端这类）。
    * 返回 [{ kind: "port"|"process", port?, pid, occupant }]，按发现顺序去重。
    */
-  externalInstances(command, projectPath) {
+  async externalInstances(command, projectPath) {
     if (command === null || command === undefined || typeof command !== "object") return [];
     let listeners;
     let snapshot;
     let tree;
     try {
-      listeners = queryTcpListeners();
-      snapshot = queryProcessSnapshot();
-      tree = queryProcessTree();
+      listeners = await this.probe.listenersFresh();
+      snapshot = await this.probe.snapshotFresh();
+      tree = await this.probe.treeFresh();
     } catch (error) {
       throw new RunnerError("internal", "无法读取端口/进程表：" + messageOf(error), { commandId: command.id });
     }
@@ -1504,14 +1698,14 @@ export class ProjectRunnerService {
   async killExternalInstances(command, projectPath) {
     let instances;
     try {
-      instances = this.externalInstances(command, projectPath);
+      instances = await this.externalInstances(command, projectPath);
     } catch (error) {
       // 读不到端口/进程表时不能静默跳过：那样用户以为做了接管，实际还是外部实例在跑。
       throw error instanceof RunnerError ? error : new RunnerError("internal", messageOf(error), { commandId: command.id });
     }
     const killed = [];
     for (const instance of instances) {
-      this.killProcess(instance.pid, true);
+      await this.killProcess(instance.pid, true);
       killed.push(instance.pid);
     }
     if (killed.length > 0) {
@@ -1519,7 +1713,7 @@ export class ProjectRunnerService {
       while (Date.now() < deadline) {
         let alive = false;
         try {
-          const table = queryProcessTable(killed);
+          const table = await this.probe.tableFresh(killed);
           alive = killed.some((pid) => table.has(pid));
         } catch (error) {
           this.reportError("无法校验外部实例是否退出", error);
@@ -1551,7 +1745,7 @@ export class ProjectRunnerService {
     if (isActive(existing)) {
       return { runner: this.snapshot(existing), adopted: false, reason: "already-managed" };
     }
-    const instances = this.externalInstances(command, workspace);
+    const instances = await this.externalInstances(command, workspace);
     if (instances.length === 0) {
       throw new RunnerError(
         "no-external-instance",
@@ -1580,14 +1774,14 @@ export class ProjectRunnerService {
     const cwd = this.effectiveCwd(command, workspace);
     let tree;
     try {
-      tree = queryProcessTree();
+      tree = await this.probe.treeFresh();
     } catch (error) {
       this.reportError("无法读取进程树，接管后端口信息可能不完整", error);
       tree = new Map();
     }
     let listeners;
     try {
-      listeners = queryTcpListeners();
+      listeners = await this.probe.listenersFresh();
     } catch (error) {
       this.reportError("无法读取端口监听表，接管时就绪状态未知", error);
       listeners = { byPort: new Map(), byPid: new Map() };
@@ -1622,7 +1816,9 @@ export class ProjectRunnerService {
       stopRequested: false,
       child: null,
       treePids: [...collectTreePids(primary.pid, tree)].sort((left, right) => left - right),
-      finished: false
+      finished: false,
+      error: null,
+      flow: null
     };
     record.exited = new Promise((resolve) => {
       record.resolveExited = resolve;
@@ -1661,12 +1857,12 @@ export class ProjectRunnerService {
   }
 
   /** 外部接管实例是否还活着（pid 存在 + 创建时间一致）。读不到进程表时保守认为还活着。 */
-  externalAlive(record) {
+  async externalAlive(record) {
     const pid = record.pid;
     if (!Number.isInteger(pid) || pid <= 0) return false;
     let table;
     try {
-      table = queryProcessTable([pid]);
+      table = await this.probe.table([pid]);
     } catch (error) {
       this.reportError("无法校验外部实例状态", error);
       return true;
@@ -1679,10 +1875,10 @@ export class ProjectRunnerService {
     const deadline = Date.now() + Math.max(0, timeoutMs);
     while (Date.now() < deadline) {
       if (!isActive(record)) return true;
-      if (!this.externalAlive(record)) return true;
+      if (!(await this.externalAlive(record))) return true;
       await sleep(100);
     }
-    return !this.externalAlive(record);
+    return !(await this.externalAlive(record));
   }
 
   /** 监听进程 pid 是否等于某个运行中 runner 的 pid，或属于其进程树（向上找祖先）。 */
@@ -1763,17 +1959,18 @@ export class ProjectRunnerService {
     const startedAt = Date.now();
     const pid = record.pid;
     if (typeof pid !== "number" || !Number.isFinite(pid) || pid <= 0) {
-      await this.finishIfActive(record, "没有可终止的 pid，状态按已停止记录");
+      // 排队中（还没 spawn）就点了停止：没有进程可杀，直接落状态；flow 会在检查点自行退出。
+      await this.finishIfActive(record, "已取消启动（尚未创建进程）");
       return;
     }
     // 外部接管：没有 child 句柄可等，退出判定走 pid + 创建时间。
     if (record.external === true) {
-      this.killProcess(pid, false);
+      await this.killProcess(pid, false);
       if (await this.waitExternalExit(record, STOP_GRACEFUL_WAIT_MS)) {
         await this.finishIfActive(record, "已结束外部实例（PID " + String(pid) + "）");
         return;
       }
-      this.killProcess(pid, true);
+      await this.killProcess(pid, true);
       const externalRemaining = Math.max(0, STOP_TIMEOUT_MS - (Date.now() - startedAt));
       if (await this.waitExternalExit(record, externalRemaining)) {
         await this.finishIfActive(record, "已强制结束外部实例（PID " + String(pid) + "）");
@@ -1783,13 +1980,13 @@ export class ProjectRunnerService {
       return;
     }
     // 第一段：温和终止（不带 /F），给进程自己清理的机会。
-    this.killProcess(pid, false);
+    await this.killProcess(pid, false);
     if (await this.waitExit(record, STOP_GRACEFUL_WAIT_MS)) {
       await this.finishIfActive(record);
       return;
     }
     // 第二段：2s 后仍活着，强制终止整棵进程树。
-    this.killProcess(pid, true);
+    await this.killProcess(pid, true);
     const remaining = Math.max(0, STOP_TIMEOUT_MS - (Date.now() - startedAt));
     if (await this.waitExit(record, remaining)) {
       await this.finishIfActive(record);
@@ -1817,17 +2014,24 @@ export class ProjectRunnerService {
     return !isActive(record);
   }
 
-  async finish(record, status, exitCode, signal, note) {
+  async finish(record, status, exitCode, signal, note, error) {
     if (record === undefined || record === null || record.finished === true) return;
     record.finished = true;
     record.status = status;
     record.exitCode = typeof exitCode === "number" ? exitCode : undefined;
     record.child = null;
+    if (error !== undefined && error !== null) record.error = error;
+    if (status !== "failed" && error === undefined) record.error = null;
     if (record.readyPort !== null) record.ready = false;
     const noteText = typeof note === "string" && note !== "" ? "\r\n[dsh-runner] " + note + "\r\n" : "";
+    // 只有真的起过进程才写「进程结束」——端口冲突/工作目录缺失/排队取消都没有进程可言。
+    const hadProcess = typeof record.pid === "number" && record.pid > 0;
     const signalText = signal === undefined || signal === null ? "" : ", signal=" + signal;
     const codeText = record.exitCode === undefined ? "unknown" : String(record.exitCode);
-    await appendLogLine(record.logPath, noteText + "\r\n[dsh-runner] 进程结束（code=" + codeText + signalText + "）\r\n");
+    await appendLogLine(
+      record.logPath,
+      noteText + (hadProcess ? "\r\n[dsh-runner] 进程结束（code=" + codeText + signalText + "）\r\n" : "")
+    );
     if (typeof record.resolveExited === "function") {
       try {
         record.resolveExited();
@@ -1839,7 +2043,7 @@ export class ProjectRunnerService {
     // 状态/落盘先定稿，再做残留清理（清理要查进程树，不能拖慢 stop/finish 的可见状态）。
     if (record.stopRequested !== true && (status === "failed" || status === "exited")) {
       try {
-        this.killRemainingDescendants(record);
+        await this.killRemainingDescendants(record);
       } catch (error) {
         this.reportError("清理残留子进程失败", error);
       }
@@ -1847,15 +2051,15 @@ export class ProjectRunnerService {
   }
 
   /** 自然退出后清理本次启动的残留子进程（只杀本次启动后创建的，避免 pid 复用误杀）。 */
-  killRemainingDescendants(record) {
+  async killRemainingDescendants(record) {
     if (process.platform !== "win32") return;
     const rootPid = record.pid;
     if (!Number.isInteger(rootPid) || rootPid <= 0) return;
     let tree;
     let snapshot;
     try {
-      tree = queryProcessTree();
-      snapshot = queryProcessSnapshot();
+      tree = await this.probe.tree();
+      snapshot = await this.probe.snapshot();
     } catch (error) {
       this.reportError("无法读取进程树，跳过残留子进程清理", error);
       return;
@@ -1867,11 +2071,11 @@ export class ProjectRunnerService {
       if (info === undefined) continue;
       const created = typeof info.createdAt === "string" ? Date.parse(info.createdAt) : Number.NaN;
       if (Number.isFinite(created) && created + 2000 < record.startedAt) continue;
-      this.killProcess(pid, true);
+      await this.killProcess(pid, true);
     }
   }
 
-  killProcess(pid, force) {
+  async killProcess(pid, force) {
     if (typeof pid !== "number" || !Number.isFinite(pid) || pid <= 0) return;
     if (process.platform !== "win32") {
       try {
@@ -1879,15 +2083,18 @@ export class ProjectRunnerService {
       } catch (error) {
         // 进程可能已退出：最终状态由 waitExit/finish 判定。
       }
+      probe.invalidate();
       return;
     }
     const args = ["/PID", String(pid), "/T"];
     if (force === true) args.push("/F");
     try {
-      spawnSync("taskkill.exe", args, { windowsHide: true, timeout: 8000 });
+      await runCommand("taskkill.exe", args, { timeoutMs: 8000 });
     } catch (error) {
-      // taskkill 自身不可用时由 waitExit 的轮询结果决定最终状态。
+      // taskkill 起不来时由 waitExit 的轮询结果决定最终状态（不在这里宣告成功）。
     }
+    // 端口/进程表刚被改变：下一次探测必须重新采样，不能吃旧缓存。
+    probe.invalidate();
   }
 
   snapshot(record) {
@@ -1907,11 +2114,19 @@ export class ProjectRunnerService {
       pid: record.pid === undefined ? null : record.pid,
       startedAt: Number.isFinite(record.startedAt) ? record.startedAt : Date.now(),
       logPath: record.logPath,
-      logBytes: Number.isFinite(this.logBytes(record.logPath)) ? this.logBytes(record.logPath) : 0,
+      logBytes: this.logBytes(record.logPath),
       adopted: record.adopted === true,
       external: record.external === true,
       pidCreatedAt: typeof record.pidCreatedAt === "string" ? record.pidCreatedAt : "",
-      adoptedAt: Number.isFinite(record.adoptedAt) ? record.adoptedAt : null
+      adoptedAt: Number.isFinite(record.adoptedAt) ? record.adoptedAt : null,
+      // 运行期失败的唯一出口：UI 从状态轮询里读它，不再靠 RPC 抛异常。
+      error: record.error === undefined || record.error === null
+        ? null
+        : {
+            code: String(record.error.code),
+            message: String(record.error.message),
+            details: jsonClone(record.error.details)
+          }
     };
   }
 
