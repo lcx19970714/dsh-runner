@@ -1,4 +1,4 @@
-// dsh-runner 的面板 UI 偏好（折叠状态）。
+// dsh-runner 的面板 UI 偏好（折叠状态 + 上次查看的日志）。
 //
 // 为什么放 Host：折叠状态是「用户对全部项目视图的偏好」，要跨会话、跨 Host 重启、
 // 跨浏览器都一致；放 localStorage 只能记住单个浏览器。文件与 commands.json 同目录。
@@ -6,16 +6,30 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { normalizePath } from "./host-config.js";
 
-export const UI_STATE_VERSION = 2;
+export const UI_STATE_VERSION = 3;
 
-/** 默认 UI 状态：全部展开、项目色自动分配（无覆盖）。 */
+/** 默认 UI 状态：全部展开、项目色自动分配（无覆盖）、没有选中的日志。 */
 export function defaultUiState() {
   return {
     version: UI_STATE_VERSION,
     collapsedProjects: [],
     collapsedGlobal: false,
-    projectColors: {}
+    projectColors: {},
+    lastSelected: null
   };
+}
+
+/**
+ * 上次查看的日志：{ projectPath, commandId }。
+ *
+ * 只做形状校验，不验证命令是否还存在 —— 那是客户端拿到 config 之后的职责
+ * （Host 在这里多读一次配置没必要，而且命令可能刚被删除）。
+ */
+function normalizeLastSelected(raw) {
+  if (raw === null || raw === undefined || typeof raw !== "object" || Array.isArray(raw)) return null;
+  if (typeof raw.commandId !== "string" || raw.commandId.trim() === "") return null;
+  const projectPath = typeof raw.projectPath === "string" ? normalizePath(raw.projectPath) : "";
+  return { projectPath, commandId: raw.commandId.trim() };
 }
 
 /** 项目颜色覆盖：只接受短标识（色板 id），键统一成规范路径。 */
@@ -49,6 +63,7 @@ export function normalizeUiState(raw) {
   }
   if (typeof raw.collapsedGlobal === "boolean") state.collapsedGlobal = raw.collapsedGlobal;
   state.projectColors = normalizeProjectColors(raw.projectColors);
+  state.lastSelected = normalizeLastSelected(raw.lastSelected);
   return state;
 }
 

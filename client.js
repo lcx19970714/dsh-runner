@@ -12,6 +12,7 @@
  *
  * 数据流（单一事实来源 = Host）：
  *   配置：config/*            —— 只从 Host RPC 读，内存 store + 订阅，无 localStorage
+ *   UI：ui/get|ui/update     —— 折叠状态 + 上次查看的日志，Host 持久化到 ui-state.json
  *   进程：project/status|start|stop|restart|startAll|stopAll
  *   日志：project/log|log/clear（轮询 tail，客户端只展示）
  *   诊断：project/diagnose|killPort
@@ -42,7 +43,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.22.0";
+    var PLUGIN_VERSION = "0.23.0";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -68,6 +69,9 @@ window.__ModuleLoader__.load({
     var DIAGNOSE_POLL_MS = 6000;
     var LOG_POLL_MS = 1000;
     var LOG_MAX_BYTES = 65536;
+    // 顶部 chip 悬停气泡：轮询要快，启动慢的服务才能看到“正在输出”的过程。
+    var HEADER_LOG_POLL_MS = 700;
+    var HEADER_LOG_MAX_CHARS = 20000;
 
     // apply(ctx) 时保存客户端根 Context；组件里按需取 DSH 服务。
     var runtimeCtx = null;
@@ -203,6 +207,17 @@ window.__ModuleLoader__.load({
       ".dshRunnerHeaderBtn:hover{background:rgba(128,128,128,.34)}",
       ".dshRunnerHeaderBtn:disabled{opacity:.45;cursor:default}",
       ".dshRunnerHeaderFloat .dshRunnerDot{margin-top:0;align-self:center}",
+
+      // ---- 顶部 chip 的实时日志气泡（悬停显示，不占布局）----
+      ".dshRunnerLogBubble{position:fixed;z-index:10001;display:flex;flex-direction:column;max-height:min(48vh,380px);border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.42));border-radius:10px;background:var(--dsw-alias-bg-layer-1,#1f1f22);box-shadow:0 16px 44px rgba(0,0,0,.5);overflow:hidden;pointer-events:auto;-webkit-app-region:no-drag;font-size:11px;line-height:16px;color:inherit;text-align:left}",
+      ".dshRunnerLogBubbleHead{display:flex;align-items:center;gap:6px;min-width:0;padding:6px 9px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.3));flex:none;white-space:nowrap}",
+      ".dshRunnerLogBubbleHead .dshRunnerDot{margin-top:0;align-self:center}",
+      ".dshRunnerLogBubbleTitle{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto}",
+      ".dshRunnerLogBubbleMeta{font-size:10px;opacity:.65;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}",
+      ".dshRunnerLogBubbleLive{margin-left:auto;flex:none;font-size:10px;color:#22c55e}",
+      ".dshRunnerLogBubbleBody{flex:1 1 auto;min-height:96px;max-height:min(42vh,330px);margin:0;padding:7px 9px;overflow:auto;font-family:ui-monospace,Consolas,'Courier New',monospace;font-size:10.5px;line-height:15px;white-space:pre-wrap;word-break:break-all;background:rgba(0,0,0,.22);color:inherit;user-select:text}",
+      ".dshRunnerLogBubbleEmpty{padding:14px 10px;font-size:10.5px;line-height:16px;opacity:.55}",
+      ".dshRunnerLogBubbleError{padding:10px;font-size:10.5px;line-height:16px;color:#f87171;word-break:break-word}",
 
       ".dshRunnerHeaderChip{display:inline-flex;align-items:center;gap:4px;flex:0 1 auto;min-width:48px;padding:1px 8px;border:none;border-radius:999px;background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.16));backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-size:10px;line-height:16px;white-space:nowrap;overflow:hidden}",
       ".dshRunnerHeaderName{font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
@@ -644,6 +659,36 @@ window.__ModuleLoader__.load({
     var uiStateCache = null;
     var uiStateLoadPromise = null;
 
+    // 日志尾部缓存：切走再回来时先渲染上次的内容，再把轮询结果贴上去。
+    // 只存最近看过的 8 条命令（每条最多 LOG_MAX_BYTES）：既覆盖来回切换，又不会无限吃内存。
+    var logTailCache = new Map();
+    var LOG_TAIL_CACHE_LIMIT = 8;
+
+    function logTailKeyOf(projectPath, commandId) {
+      return normalizePath(projectPath === undefined || projectPath === null ? "" : projectPath)
+        + "|" + String(commandId);
+    }
+
+    function rememberLogTail(key, value) {
+      if (logTailCache.has(key)) logTailCache.delete(key);
+      logTailCache.set(key, value);
+      while (logTailCache.size > LOG_TAIL_CACHE_LIMIT) {
+        var oldest = logTailCache.keys().next();
+        if (oldest.done === true) break;
+        logTailCache.delete(oldest.value);
+      }
+    }
+
+    /** 上次查看的日志：{ projectPath, commandId } 或 null（形状不对就当没记过）。 */
+    function normalizeLastSelected(raw) {
+      if (raw === null || raw === undefined || typeof raw !== "object" || Array.isArray(raw)) return null;
+      if (typeof raw.commandId !== "string" || raw.commandId.trim() === "") return null;
+      return {
+        projectPath: typeof raw.projectPath === "string" ? normalizePath(raw.projectPath) : "",
+        commandId: raw.commandId.trim()
+      };
+    }
+
     function normalizeUiSnapshot(state) {
       var projectColors = {};
       if (state !== null && state !== undefined && state.projectColors !== null
@@ -658,7 +703,8 @@ window.__ModuleLoader__.load({
       return {
         collapsedProjects: state !== null && state !== undefined && Array.isArray(state.collapsedProjects) ? state.collapsedProjects : [],
         collapsedGlobal: state !== null && state !== undefined && state.collapsedGlobal === true,
-        projectColors: projectColors
+        projectColors: projectColors,
+        lastSelected: normalizeLastSelected(state !== null && state !== undefined ? state.lastSelected : undefined)
       };
     }
 
@@ -1910,10 +1956,19 @@ window.__ModuleLoader__.load({
       var diagnosePair = react.useState([]);
       var diagnose = diagnosePair[0];
       var setDiagnose = diagnosePair[1];
-      var selectedPair = react.useState(null);
+      // 首帧就用缓存里的「上次那条日志」：选中项和日志尾巴都同步取，
+      // 这样切回面板时既不会先闪「请选择命令」，也不会先闪「暂无日志」。
+      var restoredSelection = uiStateCache !== null && uiStateCache.lastSelected !== null
+        && uiStateCache.lastSelected !== undefined
+        ? { projectPath: uiStateCache.lastSelected.projectPath, commandId: uiStateCache.lastSelected.commandId }
+        : null;
+      var restoredTail = restoredSelection === null
+        ? undefined
+        : logTailCache.get(logTailKeyOf(restoredSelection.projectPath, restoredSelection.commandId));
+      var selectedPair = react.useState(restoredSelection);
       var selected = selectedPair[0];
       var setSelected = selectedPair[1];
-      var logPair = react.useState(null);
+      var logPair = react.useState(restoredTail === undefined ? null : restoredTail);
       var logState = logPair[0];
       var setLogState = logPair[1];
       var errorPair = react.useState(null);
@@ -1949,7 +2004,7 @@ window.__ModuleLoader__.load({
       var configReadyPair = react.useState(config !== null);
       var configReady = configReadyPair[0];
       var setConfigReady = configReadyPair[1];
-      var uiStateRef = react.useRef(uiStateCache !== null ? uiStateCache : { collapsedProjects: [], collapsedGlobal: false, projectColors: {} });
+      var uiStateRef = react.useRef(uiStateCache !== null ? uiStateCache : { collapsedProjects: [], collapsedGlobal: false, projectColors: {}, lastSelected: null });
       var uiSeqRef = react.useRef(0);
       function applyUiState(next) {
         var snapshot = storeUiState(next);
@@ -2002,6 +2057,50 @@ window.__ModuleLoader__.load({
           alive = false;
         };
       }, []);
+
+      // 上次查看的日志（切走再回来、或重开 Host 都恢复到同一条命令）。
+      // 恢复只在「当前没有选择」时做一次；记忆只在「真的换了命令」时写 Host，
+      // 所以恢复动作本身不会产生写回，也不会把用户刚点的选择覆盖掉。
+      react.useEffect(function () {
+        if (!uiLoaded || !configReady) return;
+        if (selected !== null && selected !== undefined) return;
+        var last = uiStateRef.current.lastSelected;
+        if (last === null || last === undefined) return;
+        var allCommands = commandsOf(config);
+        for (var index = 0; index < allCommands.length; index += 1) {
+          if (allCommands[index].id === last.commandId) {
+            setSelected({ projectPath: last.projectPath, commandId: last.commandId });
+            return;
+          }
+        }
+        // 命令已被删除：这条记忆失效，保持「未选择」；下次选择会覆盖它。
+      }, [uiLoaded, configReady, config, selected]);
+
+      react.useEffect(function () {
+        if (!uiLoaded) return;
+        if (selected === null || selected === undefined) return;
+        var previous = uiStateRef.current;
+        var pair = {
+          projectPath: normalizePath(selected.projectPath === undefined || selected.projectPath === null ? "" : selected.projectPath),
+          commandId: selected.commandId
+        };
+        var last = previous.lastSelected;
+        if (last !== null && last !== undefined
+          && last.commandId === pair.commandId
+          && normalizePath(last.projectPath) === pair.projectPath) return;
+        applyUiState({
+          collapsedProjects: previous.collapsedProjects,
+          collapsedGlobal: previous.collapsedGlobal,
+          projectColors: previous.projectColors,
+          lastSelected: pair
+        });
+        rpc("ui/update", { lastSelected: pair }).then(function (value) {
+          var saved = value !== null && value !== undefined ? value.uiState : undefined;
+          if (saved !== null && saved !== undefined) applyUiState(saved);
+        }, function () {
+          // 偏好写失败不影响日志查看：下一次选择会重试。
+        });
+      }, [selected, uiLoaded]);
 
       // 端口诊断：每 6 秒一次，覆盖所有项目的 project 命令（页面隐藏时跳过）。
       react.useEffect(function () {
@@ -2063,7 +2162,10 @@ window.__ModuleLoader__.load({
         var timer = null;
         var projectPath = selected.projectPath;
         var commandId = selected.commandId;
-        setLogState(null);
+        var cacheKey = logTailKeyOf(projectPath, commandId);
+        var cachedTail = logTailCache.get(cacheKey);
+        // 有缓存就先摆上来：首帧直接是上次那段日志，而不是「正在读取」或「暂无日志」
+        setLogState(cachedTail === undefined ? null : cachedTail);
         stickRef.current = true;
         async function tick() {
           try {
@@ -2073,7 +2175,9 @@ window.__ModuleLoader__.load({
               maxBytes: LOG_MAX_BYTES
             });
             if (!alive) return;
-            setLogState(value !== null && value !== undefined ? value : { text: "", bytes: 0, truncated: false });
+            var nextLog = value !== null && value !== undefined ? value : { text: "", bytes: 0, truncated: false };
+            rememberLogTail(cacheKey, nextLog);
+            setLogState(nextLog);
           } catch (logError) {
             if (alive) setError(logError);
           }
@@ -2095,13 +2199,15 @@ window.__ModuleLoader__.load({
           next = {
             collapsedProjects: Array.isArray(previous.collapsedProjects) ? previous.collapsedProjects.slice() : [],
             collapsedGlobal: previous.collapsedGlobal !== true,
-            projectColors: previous.projectColors !== undefined && previous.projectColors !== null ? previous.projectColors : {}
+            projectColors: previous.projectColors !== undefined && previous.projectColors !== null ? previous.projectColors : {},
+            lastSelected: previous.lastSelected === undefined ? null : previous.lastSelected
           };
         } else {
           next = {
             collapsedProjects: toggleCollapsedProject(previous.collapsedProjects, section.projectPath),
             collapsedGlobal: previous.collapsedGlobal === true,
-            projectColors: previous.projectColors !== undefined && previous.projectColors !== null ? previous.projectColors : {}
+            projectColors: previous.projectColors !== undefined && previous.projectColors !== null ? previous.projectColors : {},
+            lastSelected: previous.lastSelected === undefined ? null : previous.lastSelected
           };
         }
         // 连续快速点击不同分组时：同步更新 ref，后一次请求会把前一次的折叠一起带上；
@@ -2119,7 +2225,8 @@ window.__ModuleLoader__.load({
             applyUiState({
               collapsedProjects: Array.isArray(saved.collapsedProjects) ? saved.collapsedProjects : next.collapsedProjects,
               collapsedGlobal: saved.collapsedGlobal === true,
-              projectColors: saved.projectColors !== undefined && saved.projectColors !== null ? saved.projectColors : next.projectColors
+              projectColors: saved.projectColors !== undefined && saved.projectColors !== null ? saved.projectColors : next.projectColors,
+              lastSelected: saved.lastSelected === undefined ? next.lastSelected : saved.lastSelected
             });
           }
         } catch (uiError) {
@@ -2144,7 +2251,8 @@ window.__ModuleLoader__.load({
         var next = {
           collapsedProjects: Array.isArray(previous.collapsedProjects) ? previous.collapsedProjects.slice() : [],
           collapsedGlobal: previous.collapsedGlobal === true,
-          projectColors: nextColors
+          projectColors: nextColors,
+          lastSelected: previous.lastSelected === undefined ? null : previous.lastSelected
         };
         applyUiState(next);
         setColorPicker(null);
@@ -2300,12 +2408,15 @@ window.__ModuleLoader__.load({
         setError(null);
         try {
           await rpc("project/log/clear", { projectPath: selected.projectPath, commandId: selected.commandId });
-          setLogState({
+          var clearedLog = {
             text: "",
             bytes: 0,
             path: logState !== null && logState !== undefined && typeof logState.path === "string" ? logState.path : "",
             truncated: false
-          });
+          };
+          // 清空也是一次「新的已知内容」：写进缓存，切走再回来不会又显示旧的尾巴
+          rememberLogTail(logTailKeyOf(selected.projectPath, selected.commandId), clearedLog);
+          setLogState(clearedLog);
           stickRef.current = true;
         } catch (clearError) {
           setError(clearError);
@@ -2802,6 +2913,8 @@ window.__ModuleLoader__.load({
       var logText = logState !== null && logState !== undefined && typeof logState.text === "string" ? stripAnsi(logState.text) : "";
       var logBytes = logState !== null && logState !== undefined && typeof logState.bytes === "number" ? logState.bytes : 0;
       var logTruncated = logState !== null && logState !== undefined && logState.truncated === true;
+      // 「还没读到」和「读到了但是空」是两件事：前者说读取中，后者才说暂无日志
+      var logPending = selected !== null && selected !== undefined && (logState === null || logState === undefined);
       var logMeta = formatBytes(logBytes) + (logTruncated ? " · 仅显示末尾 " + formatBytes(LOG_MAX_BYTES) : "");
 
       var logPane = h("div", { className: "dshRunnerLogPane" },
@@ -2829,7 +2942,9 @@ window.__ModuleLoader__.load({
           onScroll: handleLogScroll
         }, selected === null || selected === undefined
           ? "点左侧命令行查看运行日志。"
-          : (logText === "" ? "（暂无日志）" : logText)));
+          : logPending
+            ? "（正在读取日志…）"
+            : (logText === "" ? "（暂无日志）" : logText)));
 
       function renderConflictEntry(item, index) {
         var occupant = item !== null && item !== undefined && item.occupant !== null && item.occupant !== undefined
@@ -2983,6 +3098,126 @@ window.__ModuleLoader__.load({
       var actionErrorPair = react.useState(null);
       var actionError = actionErrorPair[0];
       var setActionError = actionErrorPair[1];
+
+      // ---- 悬停实时日志气泡：只读 project/log，打开期间 700ms 轮询一次 ----
+      var hoverPair = react.useState(null);
+      var hover = hoverPair[0];
+      var setHover = hoverPair[1];
+      var hoverLogPair = react.useState(null);
+      var hoverLog = hoverLogPair[0];
+      var setHoverLog = hoverLogPair[1];
+      var hoverPosPair = react.useState(null);
+      var hoverPos = hoverPosPair[0];
+      var setHoverPos = hoverPosPair[1];
+      var hoverCloseTimer = react.useRef(null);
+      var hoverBodyRef = react.useRef(null);
+      var hoverStickRef = react.useRef(true);
+
+      function cancelHoverClose() {
+        if (hoverCloseTimer.current !== null) {
+          clearTimeout(hoverCloseTimer.current);
+          hoverCloseTimer.current = null;
+        }
+      }
+
+      function closeHoverLog() {
+        cancelHoverClose();
+        hoverStickRef.current = true;
+        setHover(null);
+        setHoverLog(null);
+        setHoverPos(null);
+      }
+
+      function scheduleHoverClose() {
+        cancelHoverClose();
+        hoverCloseTimer.current = setTimeout(closeHoverLog, 300);
+      }
+
+      function openHoverLog(item, element) {
+        cancelHoverClose();
+        var rect = element !== null && element !== undefined && typeof element.getBoundingClientRect === "function"
+          ? element.getBoundingClientRect()
+          : null;
+        var viewportWidth = typeof window !== "undefined" ? window.innerWidth : 1280;
+        var viewportHeight = typeof window !== "undefined" ? window.innerHeight : 800;
+        var width = Math.max(280, Math.min(520, viewportWidth - 24));
+        var left = rect === null ? 12 : rect.left + rect.width / 2 - width / 2;
+        left = Math.max(12, Math.min(left, viewportWidth - width - 12));
+        var top = rect === null ? 44 : rect.bottom + 8;
+        if (top + 220 > viewportHeight) {
+          top = Math.max(12, (rect === null ? 44 : rect.top) - 8 - Math.min(380, Math.max(96, viewportHeight * 0.48)));
+        }
+        hoverStickRef.current = true;
+        setHoverLog(null);
+        setHoverPos({ top: top, left: left, width: width });
+        setHover({
+          key: item.key,
+          projectPath: item.projectPath,
+          commandId: item.commandId,
+          title: item.label !== undefined ? item.label : item.title,
+          status: item.status,
+          ports: Array.isArray(item.ports) ? item.ports : []
+        });
+      }
+
+      function onHoverBodyScroll(event) {
+        var element = event.currentTarget;
+        hoverStickRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 28;
+      }
+
+      react.useEffect(function () {
+        return function () {
+          if (hoverCloseTimer.current !== null) {
+            clearTimeout(hoverCloseTimer.current);
+            hoverCloseTimer.current = null;
+          }
+        };
+      }, []);
+
+      // 悬停期间轮询该命令的日志尾部；离开 chip/气泡即停止。
+      react.useEffect(function () {
+        if (hover === null || hover === undefined) return undefined;
+        var alive = true;
+        var projectPath = hover.projectPath;
+        var commandId = hover.commandId;
+        async function readHoverLog() {
+          if (projectPath === undefined || projectPath === null || projectPath === ""
+            || typeof commandId !== "string" || commandId === "") {
+            setHoverLog({ text: "", bytes: 0, error: "这条记录没有可读取的日志路径。" });
+            return;
+          }
+          try {
+            var value = await rpc("project/log", {
+              projectPath: projectPath,
+              commandId: commandId,
+              maxBytes: LOG_MAX_BYTES
+            });
+            if (!alive) return;
+            var raw = value !== null && value !== undefined && typeof value.text === "string" ? value.text : "";
+            var bytes = value !== null && value !== undefined && typeof value.bytes === "number" ? value.bytes : 0;
+            var text = stripAnsi(raw);
+            if (text.length > HEADER_LOG_MAX_CHARS) {
+              text = "…（仅显示最后 " + HEADER_LOG_MAX_CHARS + " 字符）\n" + text.slice(-HEADER_LOG_MAX_CHARS);
+            }
+            setHoverLog({ text: text, bytes: bytes, error: "" });
+          } catch (error) {
+            if (alive) setHoverLog({ text: "", bytes: 0, error: messageOf(error) });
+          }
+        }
+        readHoverLog();
+        var timer = setInterval(readHoverLog, HEADER_LOG_POLL_MS);
+        return function () {
+          alive = false;
+          clearInterval(timer);
+        };
+      }, [hover !== null && hover !== undefined ? hover.key : ""]);
+
+      // 实时滚动：默认贴底；用户手动上滚后不再强制拉回，回到底部后恢复跟随。
+      react.useEffect(function () {
+        var element = hoverBodyRef.current;
+        if (element === null || element === undefined) return;
+        if (hoverStickRef.current) element.scrollTop = element.scrollHeight;
+      }, [hoverLog]);
 
       async function runHeaderAction(item, action) {
         if (item.projectPath === undefined || item.projectPath === null || item.projectPath === ""
@@ -3250,7 +3485,18 @@ window.__ModuleLoader__.load({
 
       if (items.length === 0 || pos === null) return null;
 
-      return h("div", {
+      // 当前悬停的命令对应的最新条目（状态可能已从 starting 变成 running）。
+      var hoverItem = null;
+      if (hover !== null && hover !== undefined) {
+        for (var focusIndex = 0; focusIndex < items.length; focusIndex += 1) {
+          if (items[focusIndex].key === hover.key) {
+            hoverItem = items[focusIndex];
+            break;
+          }
+        }
+      }
+
+      var headerFloat = h("div", {
         className: "dshRunnerHeaderFloat",
         "data-dsh-runner-header": "1",
         style: {
@@ -3276,7 +3522,7 @@ window.__ModuleLoader__.load({
               type: "button",
               className: "dshRunnerHeaderBtn",
               "data-action": action,
-              title: title,
+              "aria-label": title,
               disabled: itemBusy,
               onClick: function (event) {
                 event.stopPropagation();
@@ -3290,9 +3536,13 @@ window.__ModuleLoader__.load({
             "data-status": item.status,
             "data-busy": itemBusy ? "true" : "false",
             style: { background: projectColor.tint },
-            title: tooltip
+            "aria-label": tooltip,
+            onMouseEnter: function (event) { openHoverLog(item, event.currentTarget); },
+            onMouseLeave: scheduleHoverClose,
+            onFocus: function (event) { openHoverLog(item, event.currentTarget); },
+            onBlur: scheduleHoverClose
           },
-            h("span", { className: "dshRunnerDot", "data-status": item.status, title: statusText }),
+            h("span", { className: "dshRunnerDot", "data-status": item.status }),
             h("span", { className: "dshRunnerHeaderName" }, item.label !== undefined ? item.label : item.title),
             hasActions && itemError === "" ? null : h("span", {
               className: "dshRunnerHeaderState",
@@ -3303,6 +3553,44 @@ window.__ModuleLoader__.load({
               actions.stop ? actionButton("stop", "■", "停止") : null,
               actions.restart ? actionButton("restart", "↻", "重启") : null));
         }));
+
+      if (hover === null || hover === undefined || hoverPos === null) return headerFloat;
+
+      var shownItem = hoverItem !== null && hoverItem !== undefined ? hoverItem : hover;
+      var shownStatus = shownItem.status === "external" ? "外部运行中" : runnerStatusText(shownItem.status);
+      var shownProject = shortProject(shownItem.projectPath);
+      var shownPorts = Array.isArray(shownItem.ports) ? shownItem.ports : [];
+      var shownText = hoverLog !== null && hoverLog !== undefined && typeof hoverLog.text === "string" ? hoverLog.text : "";
+      var shownError = hoverLog !== null && hoverLog !== undefined && typeof hoverLog.error === "string" ? hoverLog.error : "";
+      var shownBytes = hoverLog !== null && hoverLog !== undefined && typeof hoverLog.bytes === "number" ? hoverLog.bytes : 0;
+      var shownMeta = shownStatus
+        + (shownPorts.length > 0 ? " · 端口 " + shownPorts.join("、") : "")
+        + (shownBytes > 0 ? " · " + formatBytes(shownBytes) : "");
+
+      var hoverBubble = h("div", {
+        className: "dshRunnerLogBubble",
+        "data-dsh-runner-log-bubble": "1",
+        style: { top: hoverPos.top + "px", left: hoverPos.left + "px", width: hoverPos.width + "px" },
+        onMouseEnter: cancelHoverClose,
+        onMouseLeave: scheduleHoverClose
+      },
+        h("div", { className: "dshRunnerLogBubbleHead" },
+          h("span", { className: "dshRunnerDot", "data-status": shownItem.status }),
+          h("span", { className: "dshRunnerLogBubbleTitle" }, shownItem.label !== undefined ? shownItem.label : shownItem.title),
+          h("span", { className: "dshRunnerLogBubbleMeta" }, shownMeta),
+          h("span", { className: "dshRunnerLogBubbleLive" }, shownError === "" ? "● 实时" : "● 失败")),
+        shownError !== ""
+          ? h("div", { className: "dshRunnerLogBubbleError" }, shownError)
+          : (shownText === ""
+            ? h("div", { className: "dshRunnerLogBubbleEmpty" },
+                shownProject === "" ? "还没有日志输出（服务可能尚未打印任何内容）。" : "还没有日志输出（" + shownProject + " 的服务可能尚未打印任何内容）。")
+            : h("pre", {
+                className: "dshRunnerLogBubbleBody",
+                ref: hoverBodyRef,
+                onScroll: onHoverBodyScroll
+              }, shownText)));
+
+      return h("div", { className: "dshRunnerLogBubbleHost", style: { display: "contents" } }, headerFloat, hoverBubble);
     }
 
     // =====================================================================

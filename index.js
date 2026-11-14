@@ -300,7 +300,8 @@ async function dispatch(runner, endpoint, payload, logger) {
       version: current.version,
       collapsedProjects: current.collapsedProjects.slice(),
       collapsedGlobal: current.collapsedGlobal,
-      projectColors: Object.assign({}, current.projectColors)
+      projectColors: Object.assign({}, current.projectColors),
+      lastSelected: current.lastSelected === undefined ? null : current.lastSelected
     };
     if (data.collapsedProjects !== undefined) {
       if (!Array.isArray(data.collapsedProjects) || data.collapsedProjects.some((item) => typeof item !== "string")) {
@@ -324,6 +325,23 @@ async function dispatch(runner, endpoint, payload, logger) {
         }
       }
       next.projectColors = data.projectColors;
+    }
+    if (data.lastSelected !== undefined) {
+      if (data.lastSelected === null) {
+        next.lastSelected = null;
+      } else {
+        if (!isPlainObject(data.lastSelected)) {
+          throw new RpcError("bad-request", "ui/update 的 lastSelected 必须是对象或 null", {});
+        }
+        const commandId = typeof data.lastSelected.commandId === "string" ? data.lastSelected.commandId.trim() : "";
+        if (commandId === "") {
+          throw new RpcError("bad-request", "ui/update 的 lastSelected.commandId 不能为空", {});
+        }
+        next.lastSelected = {
+          projectPath: typeof data.lastSelected.projectPath === "string" ? data.lastSelected.projectPath : "",
+          commandId
+        };
+      }
     }
     return { uiState: await saveUiState(UI_STATE_PATH, next) };
   }
