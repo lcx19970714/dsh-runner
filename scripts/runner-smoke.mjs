@@ -36,7 +36,10 @@ const SNAPSHOT_KEYS = [
   "startedAt",
   "logPath",
   "logBytes",
-  "adopted"
+  "adopted",
+  "external",
+  "pidCreatedAt",
+  "adoptedAt"
 ];
 
 function sleep(ms) {
@@ -184,6 +187,8 @@ function createRunner() {
 
 let runner;
 let occupant;
+// 外部实例（不是插件启动的进程）：全部登记，finally 里兜底清理。
+const externals = [];
 try {
   runner = createRunner();
   await runner.init();
@@ -707,14 +712,153 @@ try {
   );
   assert.equal(runner.list(projectRoot).some((entry) => entry.commandId === "missing-cwd"), false, "缺 cwd 不应留下 runner 记录");
 
+  // ── 9) 外部实例：接管 / 解除接管 / 重启并接管 ───────────────────────────
+  // 关键不变量：
+  //   - 接管只改归属，不结束进程；停止接管实例时才结束它（没有 child 句柄，靠 pid + 创建时间判定退出）；
+  //   - 解除接管不结束进程；
+  //   - 重启并接管会把外部实例结束掉，再由插件托管启动（之后才有实时日志）。
+  const [adoptPort, releasePort, takeOverPort] = await getFreePorts(3);
+
+  function spawnExternal(port) {
+    const child = spawn(process.execPath, [listenScript], {
+      cwd: projectRoot,
+      env: Object.assign({}, process.env, { SMOKE_PORT: String(port) }),
+      windowsHide: true,
+      stdio: "ignore"
+    });
+    externals.push(child);
+    return child;
+  }
+
+  const adoptExternal = spawnExternal(adoptPort);
+  await waitFor(() => canConnect(adoptPort), 15000, "接管用外部进程开始监听");
+  const adoptExternalCommand = makeCommand({
+    id: "adopt-external",
+    title: "外部实例",
+    command: 'node "' + listenScript + '"',
+    env: { SMOKE_PORT: String(adoptPort) },
+    ports: [adoptPort],
+    readyPort: adoptPort,
+    readyTimeoutMs: 20000
+  });
+
+  // diagnose 必须能识别成外部实例，而且结果要是 lossless JSON
+  // （回归：occupant.children[].pid 曾经是 undefined，AI Tool 直接报 invalid output）。
+  const diagnoseExternal = await runner.diagnose([adoptExternalCommand], projectRoot);
+  assert.deepEqual(JSON.parse(JSON.stringify(diagnoseExternal)), diagnoseExternal, "diagnose 结果必须是 lossless JSON");
+  const adoptEntry = diagnoseExternal.find((entry) => entry.port === adoptPort);
+  assert.ok(adoptEntry !== undefined, "diagnose 应包含外部实例占用的端口");
+  assert.equal(adoptEntry.occupant.pid, adoptExternal.pid);
+  assert.equal(adoptEntry.occupant.managed, false);
+  for (const child of adoptEntry.occupant.children) {
+    assert.equal(typeof child.pid, "number", "occupant.children[].pid 必须是数字（lossless JSON）");
+  }
+
+  // 命令行里没有项目路径（spawn 出来的 node 只有脚本路径）也要能接管，但要带 warning：
+  // uvicorn / cargo tauri 这类实例的命令行确实不带项目路径，用 related 硬拦会让功能失效。
+  const adoptedResult = await runner.adopt(adoptExternalCommand, projectRoot);
+  assert.equal(typeof adoptedResult.warning, "string");
+  assert.ok(adoptedResult.warning !== "", "命令行不含项目路径时应带 warning");
+  assert.equal(adoptedResult.adopted, true);
+  assert.equal(adoptedResult.runner.external, true, "接管记录必须标记 external");
+  assert.equal(adoptedResult.runner.adopted, true);
+  assert.equal(adoptedResult.runner.status, "running");
+  assert.equal(adoptedResult.runner.pid, adoptExternal.pid);
+  assert.ok(adoptedResult.runner.pidCreatedAt !== "", "接管记录必须带 pidCreatedAt 做身份校验");
+  assert.equal(pidAlive(adoptExternal.pid), true, "接管不能结束进程");
+
+  const adoptedAgain = await runner.adopt(adoptExternalCommand, projectRoot);
+  assert.equal(adoptedAgain.adopted, false);
+  assert.equal(adoptedAgain.reason, "already-managed");
+
+  const diagnoseAdopted = await runner.diagnose([adoptExternalCommand], projectRoot);
+  assert.equal(
+    diagnoseAdopted.find((entry) => entry.port === adoptPort).occupant.managed,
+    true,
+    "接管后该端口应算托管占用"
+  );
+
+  // 停止接管实例：结束外部进程并落状态
+  assert.equal(await runner.stop(projectRoot, "adopt-external"), true);
+  await waitFor(async () => !(await canConnect(adoptPort)), 10000, "接管实例停止后端口释放");
+  assert.equal(pidAlive(adoptExternal.pid), false, "停止接管实例必须真的结束外部进程");
+  const adoptStopped = runner.list(projectRoot).find((entry) => entry.commandId === "adopt-external");
+  assert.notEqual(adoptStopped, undefined);
+  assert.equal(adoptStopped.status, "stopped");
+  const adoptStoppedLog = await readFile(adoptStopped.logPath, "utf8");
+  assert.match(adoptStoppedLog, /接管外部实例/, "接管时应往日志里写说明");
+  assert.match(adoptStoppedLog, /输出无法回放/, "日志必须说明外部实例的输出无法回放");
+
+  // 解除接管：不结束进程，记录消失，重新变回「外部运行中」
+  const releaseExternal = spawnExternal(releasePort);
+  await waitFor(() => canConnect(releasePort), 15000, "解除接管用外部进程开始监听");
+  const releaseExternalCommand = makeCommand({
+    id: "release-external",
+    title: "解除接管",
+    command: 'node "' + listenScript + '"',
+    env: { SMOKE_PORT: String(releasePort) },
+    ports: [releasePort],
+    readyPort: releasePort,
+    readyTimeoutMs: 20000
+  });
+  await runner.adopt(releaseExternalCommand, projectRoot);
+  assert.equal(await runner.release(projectRoot, "release-external"), true);
+  assert.equal(runner.list(projectRoot).some((entry) => entry.commandId === "release-external"), false, "解除接管后不再有记录");
+  assert.equal(pidAlive(releaseExternal.pid), true, "解除接管不能结束进程");
+  const diagnoseReleased = await runner.diagnose([releaseExternalCommand], projectRoot);
+  assert.equal(
+    diagnoseReleased.find((entry) => entry.port === releasePort).occupant.managed,
+    false,
+    "解除接管后该端口应重新算外部占用"
+  );
+
+  // 重启并接管：结束外部实例 -> 由插件托管启动 -> 端口属于托管进程树
+  const takeOverExternal = spawnExternal(takeOverPort);
+  await waitFor(() => canConnect(takeOverPort), 15000, "重启并接管用外部进程开始监听");
+  const takeOverCommand = makeCommand({
+    id: "takeover",
+    title: "重启并接管",
+    command: 'node "' + listenScript + '"',
+    env: { SMOKE_PORT: String(takeOverPort) },
+    ports: [takeOverPort],
+    readyPort: takeOverPort,
+    readyTimeoutMs: 20000
+  });
+  const takeOverResult = await runner.restart(takeOverCommand, projectRoot, { commands: [takeOverCommand], takeOverExternal: true });
+  assert.equal(takeOverResult.status, "running");
+  assert.equal(takeOverResult.external, false, "重启并接管后必须是插件自己启动的实例");
+  assert.notEqual(takeOverResult.pid, takeOverExternal.pid, "重启并接管必须换成新进程");
+  assert.equal(pidAlive(takeOverExternal.pid), false, "重启并接管必须结束原外部进程");
+  const diagnoseTakeOver = await runner.diagnose([takeOverCommand], projectRoot);
+  const takeOverEntry = diagnoseTakeOver.find((entry) => entry.port === takeOverPort);
+  assert.equal(takeOverEntry.occupant.managed, true, "重启并接管后端口应由托管进程树持有");
+  assert.equal(takeOverEntry.occupant.runnerCommandId, "takeover");
+  await runner.stop(projectRoot, "takeover");
+
+  // 没有外部实例时接管要给出明确错误，而不是静默成功
+  await assert.rejects(
+    () => runner.adopt(makeCommand({ id: "nothing", title: "没有实例", ports: [] }), projectRoot),
+    (error) => error instanceof RunnerError && error.code === "no-external-instance",
+    "没有外部实例时应报 no-external-instance"
+  );
+
   console.log(JSON.stringify({
     ok: true,
-    ports: { occupant: occupantPort, ready: readyPort, timeout: timeoutPort },
+    ports: { occupant: occupantPort, ready: readyPort, timeout: timeoutPort, adopt: adoptPort, release: releasePort, takeOver: takeOverPort },
     snapshotKeys: SNAPSHOT_KEYS.length
   }, null, 2));
 } finally {
   if (occupant !== undefined && pidAlive(occupant.pid)) {
     occupant.kill("SIGKILL");
+  }
+  for (const external of externals) {
+    if (external !== undefined && typeof external.pid === "number" && pidAlive(external.pid)) {
+      try {
+        external.kill("SIGKILL");
+      } catch (error) {
+        console.error("[cleanup] 结束外部实例 " + String(external.pid) + " 失败：" + String(error));
+      }
+    }
   }
   if (runner !== undefined) {
     try {

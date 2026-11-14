@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.24.0
+
+### Added（外部运行中的实例：接管 / 重启）
+
+- **「接管」外部实例**：面板里显示「外部运行中」的命令，行内多了 **接管**。接管只改归属、**不结束进程**，
+  之后这条命令就是托管状态：可以 **停止 / 重启**，行里带「外部接管」标签和 `外部 PID x`。
+  身份用 `pid + 进程创建时间` 落盘校验（`pidCreatedAt`），Host 重启后还能认回来，pid 被系统复用也不会误杀。
+- **「重启」对可外部实例也成立**：确认对话框列出占用者（端口型列端口+占用者，进程型列 PID+命令行），
+  确认后 **结束外部实例 → 等端口真正释放 → 由插件重新启动**。重启后是完整托管实例：实时日志、端口契约、依赖编排都恢复。
+  顺带修掉了「停止后立刻启动偶尔撞 port-conflict」的竞态（`waitPortsFree`）。
+- **「取消接管」**：日志区一键把外部接管实例移出托管，**不结束进程**，行恢复成「外部运行中」（点错接管的退路）。
+- **AI 侧同一能力**：`dsh_runner_run` 新增 `action=adopt` / `action=release`，`restart` 新增 `takeOver=true`。
+
+### 关于日志（必须说清楚的事实）
+
+外部进程的 stdout 没有可继承的 fd 句柄，**接管后再也拿不到它的实时输出**——这是操作系统层面做不到，
+不是实现偷懒。所以接管后的日志区会明确写「外部接管实例（PID x）：它不是插件启动的，输出无法回放，
+下面只是此前托管运行留下的日志」，并往日志里追加一条接管说明（历史内容保留，不清空）。
+**想要实时日志就点「重启」**：结束外部实例、由插件重新启动，从那一刻起日志就是实时的。
+
+### Fixed（AI Tool 调 diagnose 必失败）
+
+- `dsh_runner_run action=diagnose` 对任何「有子进程的占用者」都会返回
+  `invalid output: value is not lossless JSON`：`queryProcessSnapshot()` 的进程表里没存 `pid`，
+  而 `describeOccupant()` 用 `entry.pid` 组装 `children`，于是每个子进程都是 `{pid: undefined}`。
+  `JSON.stringify` 会把 `undefined` 丢掉所以面板一直正常，但 AI Tool 的 lossless JSON 校验直接整条判废。
+  现在进程表带上 `pid`，并把 `diagnose` 的结果统一做一次 JSON 往返兜底。
+- `startAll` 失败项的 `details` 不再是 `undefined`（同样会触发上面的校验）。
+
+### Changed
+
+- 行内动作抽成纯函数 `rowActionsFor()`：外部运行中 → 接管 + 重启；已接管 → 停止 + 重启；
+  停止中 → 只读（不再允许重复点「停止」打断状态机）。离线 smoke 覆盖这几种状态。
+- `state` 文件补写 `treePids`（0.22.0 只在 Host 内存里维护，Host 重启后那段残留清理其实拿不到数据）。
+
 ## 0.23.0
 
 ### Added（记住上次查看的日志）

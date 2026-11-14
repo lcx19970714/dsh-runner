@@ -28,6 +28,8 @@ const STOP_GRACEFUL_WAIT_MS = 2000;
 const STOP_TIMEOUT_MS = 4000;
 const ADOPTED_REFRESH_MS = 1500;
 const PORT_FALLBACK_GRACE_MS = 3000;
+/** 停止/结束后等端口真正释放的上限：Windows 上监听 socket 关闭比进程退出略晚。 */
+const PORT_RELEASE_TIMEOUT_MS = 6000;
 const MARKER_PREFIX = "dsh-runner-";
 const MAX_PORT = 65535;
 const LOG_DEFAULT_MAX_BYTES = 65536;
@@ -340,7 +342,8 @@ function markOccupantRelated(occupant, projectPath, cwd) {
 }
 
 /**
- * 读取指定 pid 的进程信息：pid -> {name, commandLine}。
+ * 读取指定 pid 的进程信息：pid -> {name, createdAt, commandLine}。
+ * createdAt 用于「外部接管」的身份校验（pid 会被复用，创建时间不会）。
  * 进程不存在时不会出现在结果里；读取失败时抛错（调用方必须保守处理）。
  */
 function queryProcessTable(pids) {
@@ -351,7 +354,7 @@ function queryProcessTable(pids) {
     for (const pid of ids) {
       try {
         process.kill(pid, 0);
-        map.set(pid, { name: "", commandLine: "" });
+        map.set(pid, { name: "", createdAt: "", commandLine: "" });
       } catch (error) {
         // 进程不存在：不加入结果表。
       }
@@ -359,8 +362,9 @@ function queryProcessTable(pids) {
     return map;
   }
   const filter = ids.map((pid) => "ProcessId=" + String(pid)).join(" OR ");
+  // createdAt 必须排在 commandLine 之前：命令行里可能有 "|"，创建时间是固定格式不会有。
   const script = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; "
-    + "Get-CimInstance Win32_Process -Filter \"" + filter + "\" | ForEach-Object { \"$($_.ProcessId)|$($_.Name)|$($_.CommandLine)\" }";
+    + "Get-CimInstance Win32_Process -Filter \"" + filter + "\" | ForEach-Object { \"$($_.ProcessId)|$($_.Name)|$(if ($_.CreationDate) { $_.CreationDate.ToString('o') } else { '' })|$($_.CommandLine)\" }";
   const result = spawnSync(resolvePowerShell(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
     encoding: "utf8",
     windowsHide: true,
@@ -374,9 +378,15 @@ function queryProcessTable(pids) {
     if (first <= 0) continue;
     const second = line.indexOf("|", first + 1);
     if (second === -1) continue;
+    const third = line.indexOf("|", second + 1);
+    if (third === -1) continue;
     const pid = Number(line.slice(0, first).trim());
     if (!Number.isFinite(pid)) continue;
-    map.set(pid, { name: line.slice(first + 1, second), commandLine: line.slice(second + 1) });
+    map.set(pid, {
+      name: line.slice(first + 1, second),
+      createdAt: line.slice(second + 1, third),
+      commandLine: line.slice(third + 1)
+    });
   }
   return map;
 }
@@ -396,6 +406,7 @@ function queryProcessSnapshot() {
       const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s*(.*)$/.exec(line);
       if (match === null) continue;
       map.set(Number(match[1]), {
+        pid: Number(match[1]),
         parentPid: Number(match[2]),
         name: match[3],
         commandLine: match[4],
@@ -451,6 +462,7 @@ function queryProcessSnapshot() {
     const pid = Number(row.pid);
     if (!Number.isFinite(pid)) continue;
     map.set(pid, {
+      pid: pid,
       parentPid: Number.isFinite(Number(row.ppid)) ? Number(row.ppid) : 0,
       name: typeof row.name === "string" ? row.name : "",
       commandLine: typeof row.cmd === "string" ? row.cmd : "",
@@ -504,13 +516,37 @@ function describeOccupant(pid, snapshot) {
   }
   return occupant;
 }
+
+/**
+ * 外部接管的身份校验：pid 存在 + 创建时间一致（±2s）。
+ * 外部进程不是本插件启动的，命令行里没有 marker，只能用「pid + 创建时间」代替，
+ * 这样 pid 被系统复用时不会误杀别的进程。
+ */
+function isSameProcess(expected, info) {
+  if (info === undefined || info === null) return false;
+  const wanted = expected !== null && expected !== undefined && typeof expected.pidCreatedAt === "string" ? expected.pidCreatedAt : "";
+  const actual = typeof info.createdAt === "string" ? info.createdAt : "";
+  if (wanted === "" || actual === "") return true;
+  const left = Date.parse(wanted);
+  const right = Date.parse(actual);
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return true;
+  return Math.abs(left - right) <= 2000;
+}
+
+/**
+ * state 条目是否可用：
+ * - 插件自己启动的实例必须带 marker + logPath（命令行标记用于跳过 pid 复用）；
+ * - 外部接管的实例没有 marker，靠 pid + pidCreatedAt 校验，logPath 只用于展示历史日志。
+ */
 function isStateEntry(entry) {
-  return entry !== null && typeof entry === "object"
+  const usable = entry !== null && typeof entry === "object"
     && typeof entry.pid === "number" && Number.isFinite(entry.pid) && entry.pid > 0
-    && typeof entry.marker === "string" && entry.marker !== ""
-    && typeof entry.logPath === "string" && entry.logPath !== ""
     && typeof entry.projectPath === "string" && entry.projectPath !== ""
     && typeof entry.commandId === "string" && entry.commandId !== "";
+  if (!usable) return false;
+  if (entry.external === true) return true;
+  return typeof entry.marker === "string" && entry.marker !== ""
+    && typeof entry.logPath === "string" && entry.logPath !== "";
 }
 
 /** 按 dependsOn 做拓扑排序（只排 selected 内部的依赖，selected 之外的由 start 递归处理）。 */
@@ -631,8 +667,10 @@ export class ProjectRunnerService {
     const dead = [];
     for (const entry of candidates) {
       const processInfo = table.get(entry.pid);
-      const alive = processInfo !== undefined
-        && (process.platform !== "win32" || processInfo.commandLine.indexOf(entry.marker) !== -1);
+      const alive = entry.external === true
+        ? isSameProcess(entry, processInfo)
+        : (processInfo !== undefined
+          && (process.platform !== "win32" || processInfo.commandLine.indexOf(entry.marker) !== -1));
       if (!alive) {
         dead.push(entry);
         if (processInfo === undefined) {
@@ -655,8 +693,9 @@ export class ProjectRunnerService {
         readyPort: readyPort,
         readyTimeoutMs: Number.isInteger(entry.readyTimeoutMs) ? entry.readyTimeoutMs : DEFAULT_READY_TIMEOUT_MS,
         logPath: entry.logPath,
-        marker: entry.marker,
+        marker: typeof entry.marker === "string" ? entry.marker : "",
         pid: entry.pid,
+        pidCreatedAt: typeof entry.pidCreatedAt === "string" ? entry.pidCreatedAt : "",
         startedAt: typeof entry.startedAt === "number" ? entry.startedAt : Date.now(),
         status: "running",
         ready: ready,
@@ -664,6 +703,8 @@ export class ProjectRunnerService {
         exitCode: undefined,
         stopRequested: false,
         adopted: true,
+        adoptedAt: typeof entry.adoptedAt === "number" ? entry.adoptedAt : undefined,
+        external: entry.external === true,
         child: null,
         treePids: Array.isArray(entry.treePids) ? entry.treePids.filter((pid) => Number.isInteger(pid)) : [],
         finished: false
@@ -755,10 +796,19 @@ export class ProjectRunnerService {
     }
     for (const record of adopted) {
       const processInfo = table.get(record.pid);
-      const alive = processInfo !== undefined
-        && (process.platform !== "win32" || processInfo.commandLine.indexOf(record.marker) !== -1);
+      // 外部接管：命令行里没有 marker，只能用 pid + 创建时间校验身份。
+      const alive = record.external === true
+        ? isSameProcess(record, processInfo)
+        : (processInfo !== undefined
+          && (process.platform !== "win32" || processInfo.commandLine.indexOf(record.marker) !== -1));
       if (alive) continue;
-      await this.finish(record, "exited", undefined, undefined, "接管进程已结束（Host 重启后检测）");
+      await this.finish(
+        record,
+        "exited",
+        undefined,
+        undefined,
+        record.external === true ? "外部实例已结束（插件外被关闭）" : "接管进程已结束（Host 重启后检测）"
+      );
     }
   }
 
@@ -1157,11 +1207,41 @@ export class ProjectRunnerService {
     return stopped;
   }
 
-  /** 重启：先完整停止（含 graceful/force 两段），再重新启动。 */
+  /**
+   * 重启：先完整停止（含 graceful/force 两段），再重新启动。
+   * - options.takeOverExternal：停止后把这条命令的外部实例（声明端口占用者 + 归属该命令的进程）
+   *   一起结束，让「重启」对「外部运行中」的实例也成立：
+   *   结束外部实例 -> 等端口释放 -> 由插件重新启动 -> 之后才有实时日志。
+   * - 端口释放留一段等待：Windows 上监听 socket 关闭比进程退出晚一点，
+   *   不等待会让紧跟着的启动误判 port-conflict。
+   */
   async restart(command, projectPath, options = {}) {
     await this.init();
     await this.stop(projectPath, command.id);
-    return this.start(command, projectPath, options);
+    const startOptions = Object.assign({}, options);
+    delete startOptions.takeOverExternal;
+    if (options.takeOverExternal === true) await this.killExternalInstances(command, projectPath);
+    const ports = Array.isArray(command.ports) ? command.ports.filter((port) => Number.isInteger(port)) : [];
+    if (ports.length > 0) await this.waitPortsFree(ports, PORT_RELEASE_TIMEOUT_MS);
+    return this.start(command, projectPath, startOptions);
+  }
+
+  /** 等声明端口从监听表里消失；超时也放行，由 start 的 assertPortsFree 给出带占用者的明确错误。 */
+  async waitPortsFree(ports, timeoutMs) {
+    if (!Array.isArray(ports) || ports.length === 0) return true;
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (Date.now() < deadline) {
+      let listeners;
+      try {
+        listeners = queryTcpListeners();
+      } catch (error) {
+        this.reportError("无法读取端口监听表", error);
+        return false;
+      }
+      if (!ports.some((port) => listeners.byPort.has(port))) return true;
+      await sleep(150);
+    }
+    return true;
   }
 
   /** 按依赖拓扑序启动项目内所有 enabled 命令；单个失败不中断后续。 */
@@ -1191,7 +1271,8 @@ export class ProjectRunnerService {
           title: command.title,
           code: error instanceof RunnerError ? error.code : "internal",
           message: messageOf(error),
-          details: error instanceof RunnerError ? error.details : undefined
+          // 必须是 JSON 可表示的值：undefined 会让 AI Tool 的 lossless JSON 校验直接失败。
+          details: error instanceof RunnerError ? error.details : {}
         });
       }
     }
@@ -1367,6 +1448,243 @@ export class ProjectRunnerService {
     throw new RunnerError("kill-failed", "无法结束占用端口 " + String(port) + " 的进程 " + String(pid), { port: port, pid: pid, occupant: occupant });
   }
 
+  /**
+   * 一条命令当前的外部实例（不是任何托管 runner 的进程树）：
+   *   1) 声明端口上的非托管监听者（带 port 的条目）；
+   *   2) 可执行文件位于命令 cwd 之下、且没有声明端口的进程（Tauri 客户端这类）。
+   * 返回 [{ kind: "port"|"process", port?, pid, occupant }]，按发现顺序去重。
+   */
+  externalInstances(command, projectPath) {
+    if (command === null || command === undefined || typeof command !== "object") return [];
+    let listeners;
+    let snapshot;
+    let tree;
+    try {
+      listeners = queryTcpListeners();
+      snapshot = queryProcessSnapshot();
+      tree = queryProcessTree();
+    } catch (error) {
+      throw new RunnerError("internal", "无法读取端口/进程表：" + messageOf(error), { commandId: command.id });
+    }
+    const managedPids = new Set();
+    for (const record of this.records.values()) {
+      if (!isActive(record) || typeof record.pid !== "number") continue;
+      for (const pid of collectTreePids(record.pid, tree)) managedPids.add(pid);
+    }
+    const cwd = this.effectiveCwd(command, projectPath);
+    const instances = [];
+    const seen = new Set();
+    const ports = Array.isArray(command.ports) ? command.ports.filter((port) => Number.isInteger(port)) : [];
+    for (const port of ports) {
+      const owners = listeners.byPort.get(port);
+      if (owners === undefined) continue;
+      for (const pid of owners) {
+        if (managedPids.has(pid) || seen.has(pid)) continue;
+        seen.add(pid);
+        const occupant = markOccupantRelated(describeOccupant(pid, snapshot), projectPath, cwd);
+        occupant.managed = false;
+        instances.push({ kind: "port", port: port, pid: pid, occupant: occupant });
+      }
+    }
+    if (command.scope === "project") {
+      for (const bucket of attributeProjectProcesses([command], snapshot, managedPids, projectPath)) {
+        for (const item of bucket.processes) {
+          if (managedPids.has(item.pid) || seen.has(item.pid)) continue;
+          seen.add(item.pid);
+          const occupant = markOccupantRelated(describeOccupant(item.pid, snapshot), projectPath, cwd);
+          occupant.managed = false;
+          instances.push({ kind: "process", pid: item.pid, occupant: occupant });
+        }
+      }
+    }
+    return instances;
+  }
+
+  /** 结束一条命令的所有外部实例（「重启并接管」用）。返回被结束的 pid 列表。 */
+  async killExternalInstances(command, projectPath) {
+    let instances;
+    try {
+      instances = this.externalInstances(command, projectPath);
+    } catch (error) {
+      // 读不到端口/进程表时不能静默跳过：那样用户以为做了接管，实际还是外部实例在跑。
+      throw error instanceof RunnerError ? error : new RunnerError("internal", messageOf(error), { commandId: command.id });
+    }
+    const killed = [];
+    for (const instance of instances) {
+      this.killProcess(instance.pid, true);
+      killed.push(instance.pid);
+    }
+    if (killed.length > 0) {
+      const deadline = Date.now() + PORT_RELEASE_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        let alive = false;
+        try {
+          const table = queryProcessTable(killed);
+          alive = killed.some((pid) => table.has(pid));
+        } catch (error) {
+          this.reportError("无法校验外部实例是否退出", error);
+          break;
+        }
+        if (!alive) break;
+        await sleep(150);
+      }
+    }
+    return killed;
+  }
+
+  /**
+   * 接管外部实例：把「不是本插件启动、但确实是这条命令的实例」纳入托管。
+   * - 只改归属，不结束进程：停止/重启仍由用户显式触发；
+   * - pid + 创建时间落盘，Host 重启后仍能校验身份（避免 pid 复用误杀）；
+   * - 外部进程的 stdout 无法回放（没有 fd 句柄），日志里追加一条说明，
+   *   文件里保留此前托管运行的输出，下一次从这里「重启」后就是实时日志。
+   */
+  async adopt(command, projectPath, options = {}) {
+    await this.init();
+    if (command === null || command === undefined || typeof command !== "object") {
+      throw new RunnerError("bad-request", "adopt 需要命令对象", {});
+    }
+    const workspace = typeof projectPath === "string" ? projectPath.trim() : "";
+    if (workspace === "") throw new RunnerError("bad-request", "接管需要项目路径", {});
+    const key = this.key(workspace, command.id);
+    const existing = this.records.get(key);
+    if (isActive(existing)) {
+      return { runner: this.snapshot(existing), adopted: false, reason: "already-managed" };
+    }
+    const instances = this.externalInstances(command, workspace);
+    if (instances.length === 0) {
+      throw new RunnerError(
+        "no-external-instance",
+        "「" + command.title + "」没有可接管的外部实例：声明端口没被外部进程占用，也没有归属该命令的进程",
+        { commandId: command.id, projectPath: workspace }
+      );
+    }
+    const expectedPid = Number.isInteger(options.pid) ? options.pid : undefined;
+    const primary = expectedPid === undefined ? instances[0] : instances.find((item) => item.pid === expectedPid);
+    if (primary === undefined) {
+      throw new RunnerError(
+        "instance-changed",
+        "要接管的外部实例（PID " + String(expectedPid) + "）已经不在了，请刷新后用新的 PID 重试",
+        { commandId: command.id, pid: expectedPid, instances: instances.map((item) => ({ pid: item.pid, kind: item.kind, port: item.port })) }
+      );
+    }
+    // 接管目标本来就已按「声明端口 / 命令 cwd」归属到这条命令，所以不再用 related 硬拦
+    // （uvicorn、cargo tauri 这类命令行里不带项目路径的实例否则永远接管不了）。
+    // 命令行里没有项目路径时带一条警告回去，日志里也留痕，用户能看出接管的是哪个进程。
+    const related = instances.some((item) => item.occupant !== undefined && item.occupant.related === true);
+    const warning = related
+      ? ""
+      : "该实例的命令行里没有项目路径，按「声明端口/命令目录」归属接管：" + occupantText(primary.occupant);
+    const ports = Array.isArray(command.ports) ? command.ports.filter((port) => Number.isInteger(port)) : [];
+    const readyPort = Number.isInteger(command.readyPort) ? command.readyPort : null;
+    const cwd = this.effectiveCwd(command, workspace);
+    let tree;
+    try {
+      tree = queryProcessTree();
+    } catch (error) {
+      this.reportError("无法读取进程树，接管后端口信息可能不完整", error);
+      tree = new Map();
+    }
+    let listeners;
+    try {
+      listeners = queryTcpListeners();
+    } catch (error) {
+      this.reportError("无法读取端口监听表，接管时就绪状态未知", error);
+      listeners = { byPort: new Map(), byPid: new Map() };
+    }
+    const createdAt = primary.occupant !== undefined && typeof primary.occupant.startedAt === "string" ? primary.occupant.startedAt : "";
+    const createdMs = createdAt === "" ? Number.NaN : Date.parse(createdAt);
+    const actualPorts = ports.length === 0
+      ? []
+      : [...treeListeningPorts(primary.pid, tree, listeners).ports].sort((left, right) => left - right);
+    const record = {
+      key: key,
+      projectPath: workspace,
+      commandId: command.id,
+      title: typeof command.title === "string" && command.title !== "" ? command.title : String(command.id),
+      command: typeof command.command === "string" ? command.command : "",
+      cwd: cwd,
+      ports: ports,
+      readyPort: readyPort,
+      readyTimeoutMs: Number.isInteger(command.readyTimeoutMs) ? command.readyTimeoutMs : DEFAULT_READY_TIMEOUT_MS,
+      logPath: this.logPathFor(workspace, command.id),
+      marker: "",
+      pid: primary.pid,
+      pidCreatedAt: createdAt,
+      startedAt: Number.isFinite(createdMs) ? createdMs : Date.now(),
+      adoptedAt: Date.now(),
+      adopted: true,
+      external: true,
+      status: "running",
+      ready: readyPort === null ? null : await canConnectAny(readyPort),
+      actualPorts: actualPorts,
+      exitCode: undefined,
+      stopRequested: false,
+      child: null,
+      treePids: [...collectTreePids(primary.pid, tree)].sort((left, right) => left - right),
+      finished: false
+    };
+    record.exited = new Promise((resolve) => {
+      record.resolveExited = resolve;
+    });
+    this.records.set(key, record);
+    const where = primary.kind === "port" ? "占用端口 " + String(primary.port) : "归属本命令 cwd";
+    await appendLogLine(
+      record.logPath,
+      "\r\n[dsh-runner] " + new Date().toLocaleString() + " 接管外部实例：" + occupantText(primary.occupant) + "（" + where + "）\r\n"
+        + (warning === "" ? "" : "[dsh-runner] 注意：" + warning + "\r\n")
+        + "[dsh-runner] 该实例不是本插件启动，它的输出无法回放；下面保留此前的托管日志。\r\n"
+        + "[dsh-runner] 需要实时日志时点「重启」：结束这个外部实例并由插件重新启动。\r\n"
+    );
+    await this.persist();
+    return { runner: this.snapshot(record), adopted: true, reason: "adopted", instances: instances.length, warning: warning };
+  }
+
+  /**
+   * 解除接管：只把记录移出托管，不结束进程。
+   * 之后这条命令会重新显示为「外部运行中」，插件不再为它负责。
+   */
+  async release(projectPath, commandId) {
+    await this.init();
+    const record = this.records.get(this.key(projectPath, commandId));
+    if (record === undefined) return false;
+    if (record.external !== true) {
+      throw new RunnerError(
+        "not-external",
+        "「" + record.title + "」是本插件启动的实例，不能解除接管；要结束它请用「停止」",
+        { commandId: commandId, pid: record.pid }
+      );
+    }
+    this.records.delete(this.key(projectPath, commandId));
+    await this.persist();
+    return true;
+  }
+
+  /** 外部接管实例是否还活着（pid 存在 + 创建时间一致）。读不到进程表时保守认为还活着。 */
+  externalAlive(record) {
+    const pid = record.pid;
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    let table;
+    try {
+      table = queryProcessTable([pid]);
+    } catch (error) {
+      this.reportError("无法校验外部实例状态", error);
+      return true;
+    }
+    return isSameProcess(record, table.get(pid));
+  }
+
+  /** 等外部实例真正退出（没有 child 句柄，只能按 pid + 创建时间轮询）。 */
+  async waitExternalExit(record, timeoutMs) {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (Date.now() < deadline) {
+      if (!isActive(record)) return true;
+      if (!this.externalAlive(record)) return true;
+      await sleep(100);
+    }
+    return !this.externalAlive(record);
+  }
+
   /** 监听进程 pid 是否等于某个运行中 runner 的 pid，或属于其进程树（向上找祖先）。 */
   findManagedRunner(pid, snapshot) {
     const activeByPid = new Map();
@@ -1446,6 +1764,22 @@ export class ProjectRunnerService {
     const pid = record.pid;
     if (typeof pid !== "number" || !Number.isFinite(pid) || pid <= 0) {
       await this.finishIfActive(record, "没有可终止的 pid，状态按已停止记录");
+      return;
+    }
+    // 外部接管：没有 child 句柄可等，退出判定走 pid + 创建时间。
+    if (record.external === true) {
+      this.killProcess(pid, false);
+      if (await this.waitExternalExit(record, STOP_GRACEFUL_WAIT_MS)) {
+        await this.finishIfActive(record, "已结束外部实例（PID " + String(pid) + "）");
+        return;
+      }
+      this.killProcess(pid, true);
+      const externalRemaining = Math.max(0, STOP_TIMEOUT_MS - (Date.now() - startedAt));
+      if (await this.waitExternalExit(record, externalRemaining)) {
+        await this.finishIfActive(record, "已强制结束外部实例（PID " + String(pid) + "）");
+        return;
+      }
+      await this.finishIfActive(record, "外部实例未在超时内确认退出，状态按已停止记录");
       return;
     }
     // 第一段：温和终止（不带 /F），给进程自己清理的机会。
@@ -1574,7 +1908,10 @@ export class ProjectRunnerService {
       startedAt: Number.isFinite(record.startedAt) ? record.startedAt : Date.now(),
       logPath: record.logPath,
       logBytes: Number.isFinite(this.logBytes(record.logPath)) ? this.logBytes(record.logPath) : 0,
-      adopted: record.adopted === true
+      adopted: record.adopted === true,
+      external: record.external === true,
+      pidCreatedAt: typeof record.pidCreatedAt === "string" ? record.pidCreatedAt : "",
+      adoptedAt: Number.isFinite(record.adoptedAt) ? record.adoptedAt : null
     };
   }
 
@@ -1626,7 +1963,12 @@ export class ProjectRunnerService {
         logPath: record.logPath,
         marker: record.marker,
         pid: record.pid === undefined ? null : record.pid,
-        startedAt: record.startedAt
+        pidCreatedAt: typeof record.pidCreatedAt === "string" ? record.pidCreatedAt : "",
+        startedAt: record.startedAt,
+        adopted: record.adopted === true,
+        adoptedAt: Number.isFinite(record.adoptedAt) ? record.adoptedAt : null,
+        external: record.external === true,
+        treePids: Array.isArray(record.treePids) ? record.treePids.slice() : []
       });
     }
     const payload = JSON.stringify({

@@ -43,7 +43,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.23.0";
+    var PLUGIN_VERSION = "0.24.0";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -255,11 +255,14 @@ window.__ModuleLoader__.load({
       ".dshRunnerMiniBtn:hover:not([disabled]){background:rgba(103,158,254,.14)}",
       ".dshRunnerMiniBtn[disabled]{opacity:.35;cursor:default}",
       ".dshRunnerMiniBtn[data-action=stop]:hover:not([disabled]){background:rgba(239,68,68,.12);color:#f87171}",
+      ".dshRunnerMiniBtn[data-action=adopt]:hover:not([disabled]){background:rgba(245,158,11,.16);color:#f59e0b}",
+      ".dshRunnerTagExternal{flex:none;padding:0 5px;border-radius:999px;border:.5px solid rgba(245,158,11,.55);color:#f59e0b;background:rgba(245,158,11,.1);font-size:9px;line-height:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:46%}",
       ".dshRunnerEmpty{padding:22px 12px;text-align:center;font-size:11px;line-height:17px;opacity:.55}",
       ".dshRunnerLogPane{display:flex;flex-direction:column;min-width:0;min-height:0;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));border-radius:10px;background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.05));overflow:hidden}",
       ".dshRunnerLogHead{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 9px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));font-size:11px;line-height:16px;min-width:0}",
       ".dshRunnerLogTitle{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 120px}",
       ".dshRunnerLogMeta{font-size:10px;opacity:.55;white-space:nowrap;flex:none}",
+      ".dshRunnerLogNote{font-size:10px;line-height:14px;color:#f59e0b;flex:1 1 100%;min-width:0;white-space:normal;word-break:break-word}",
       ".dshRunnerPre{flex:1;min-height:140px;margin:0;padding:8px 10px;overflow:auto;font-family:ui-monospace,Consolas,'Courier New',monospace;font-size:11px;line-height:16px;white-space:pre-wrap;word-break:break-all;user-select:text;background:rgba(0,0,0,.18);color:inherit}",
       ".dshRunnerError{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;border:.5px solid rgba(239,68,68,.45);background:rgba(239,68,68,.08);color:#f87171;border-radius:8px;padding:7px 9px;font-size:11px;line-height:16px;flex:none}",
       ".dshRunnerErrorText{flex:1 1 220px;min-width:0;word-break:break-word}",
@@ -880,6 +883,42 @@ window.__ModuleLoader__.load({
       }
       if (status === "stopping") return { start: false, stop: false, restart: false };
       return { start: true, stop: false, restart: false };
+    }
+
+    /**
+     * 「运行」面板行内的三个动作（纯函数，便于离线断言）。
+     * - 外部运行中（未接管）：接管（只改归属）+ 重启（确认后结束外部实例并改为托管启动）；
+     * - 已接管的外部实例：停止 + 重启（重启天然会换成托管进程，之后有实时日志）；
+     * - 普通托管：未运行 → 启动；运行中/启动中 → 停止 + 重启；停止中 → 只读。
+     */
+    function rowActionsFor(options) {
+      var status = options !== null && options !== undefined && typeof options.status === "string" ? options.status : "idle";
+      var hasRunner = options !== null && options !== undefined && options.hasRunner === true;
+      var external = options !== null && options !== undefined && options.external === true;
+      var canAct = options !== null && options !== undefined && options.canAct !== false;
+      var disabled = options !== null && options !== undefined && options.disabled === true;
+      var canStart = canAct && options !== null && options !== undefined && options.runnerOnly !== true;
+      var active = status === "starting" || status === "running" || status === "stopping";
+      var needsHost = !hasRunner && external;
+      if (disabled) return { adopt: false, start: false, stop: false, restart: false, label: "启动" };
+      if (needsHost) {
+        return {
+          adopt: canStart && !active,
+          start: false,
+          stop: false,
+          // 端到端「重启并接管」会结束外部进程，属破坏性动作：配置里还有这条命令才允许
+          restart: canStart && status !== "stopping",
+          label: "接管"
+        };
+      }
+      return {
+        adopt: false,
+        start: canStart && !active,
+        // 停止中不再给「停止」：重复触发只会打断状态机，等它落定即可。
+        stop: canAct && hasRunner && (status === "running" || status === "starting"),
+        restart: canStart && status !== "stopping",
+        label: "启动"
+      };
     }
 
     /**
@@ -2326,6 +2365,46 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * 接管：把外部运行中的实例纳入托管（只改归属，不结束进程），之后面板里就能停止/重启它。
+       * 外部进程的 stdout 回放不了，日志区会明确说明；要实时日志就点「重启」。
+       */
+      async function runAdopt(commandId, projectPath, entry) {
+        if (busy !== null || projectPath === undefined || projectPath === null || projectPath === "") return;
+        setBusy(commandId);
+        setError(null);
+        try {
+          var occupantPid = entry !== null && entry !== undefined && entry.occupant !== null && entry.occupant !== undefined
+            && typeof entry.occupant.pid === "number" ? entry.occupant.pid : undefined;
+          var value = await rpc("project/adopt", { projectPath: projectPath, commandId: commandId, pid: occupantPid });
+          await refreshStatus();
+          if (value !== null && value !== undefined && value.adopted === true) {
+            setSelected({ projectPath: projectPath, commandId: commandId });
+          }
+          await refreshDiagnose();
+        } catch (adoptError) {
+          setError(adoptError);
+        } finally {
+          setBusy(null);
+        }
+      }
+
+      /** 解除接管：只把实例移出托管，不结束进程（点错接管时用）。 */
+      async function releaseAdopted(projectPath, commandId) {
+        if (busy !== null) return;
+        setBusy(commandId);
+        setError(null);
+        try {
+          await rpc("project/release", { projectPath: projectPath, commandId: commandId });
+          await refreshStatus();
+          await refreshDiagnose();
+        } catch (releaseError) {
+          setError(releaseError);
+        } finally {
+          setBusy(null);
+        }
+      }
+
       async function runStartAll(projectPath) {
         if (busy !== null || projectPath === undefined || projectPath === null || projectPath === "") return;
         setBusy("__startAll__");
@@ -2388,16 +2467,24 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /** 行内「结束并启动」：用诊断到的外部占用者直接打开端口冲突对话框。 */
-      function openExternalConflict(entry, commandId, projectPath) {
+      /**
+       * 行内「重启」用的确认入口：把诊断到的外部实例摆进对话框。
+       * - action="restart"：确认后结束外部实例并交给插件启动（takeOver），之后才有实时日志；
+       * - action="start"：处理占用后重试启动。
+       */
+      function openExternalConflict(entry, commandId, projectPath, action) {
         if (entry === null || entry === undefined) return;
+        var verb = action === "restart" ? "restart" : "start";
+        var isProcess = entry.kind === "process";
         setError(null);
         setConflict({
           projectPath: typeof entry.projectPath === "string" && entry.projectPath !== "" ? entry.projectPath : projectPath,
           commandId: commandId,
-          action: "start",
-          kind: "port-conflict",
-          ports: [{ port: entry.port, occupant: entry.occupant }],
+          action: verb,
+          kind: isProcess ? "process-conflict" : "port-conflict",
+          takeOver: verb === "restart",
+          ports: isProcess || !Number.isInteger(entry.port) ? [] : [{ port: entry.port, occupant: entry.occupant }],
+          processes: isProcess && Array.isArray(entry.processes) ? entry.processes : [],
           actualPorts: []
         });
       }
@@ -2446,6 +2533,15 @@ window.__ModuleLoader__.load({
         setConflictBusy(true);
         setConflictError(null);
         try {
+          // 「重启并接管」：Host 自己结束外部实例（端口占用者 + 归属该命令的进程），再按托管方式启动。
+          if (conflict.takeOver === true) {
+            await rpc("project/restart", { projectPath: projectPath, commandId: conflict.commandId, takeOver: true });
+            await refreshStatus();
+            setSelected({ projectPath: projectPath, commandId: conflict.commandId });
+            await refreshDiagnose();
+            setConflict(null);
+            return;
+          }
           var items = Array.isArray(conflict.ports) ? conflict.ports : [];
           for (var i = 0; i < items.length; i += 1) {
             var item = items[i];
@@ -2680,16 +2776,14 @@ window.__ModuleLoader__.load({
         var current = row.runner !== undefined ? row.runner : findRowRunner(command, projectPath);
         var hasRunner = current !== null && current !== undefined;
         var external = externalOccupancyForCommand(diagnose, command.id, projectPath);
-        var externalIsProcess = external !== undefined && external.kind === "process";
+        /** 已接管的外部实例：托管状态，但进程不是插件启动的（日志不能回放）。 */
+        var adoptedExternal = hasRunner && current.external === true;
         var status = hasRunner && typeof current.status === "string"
           ? current.status
           : (external !== undefined ? "external" : "idle");
         var disabled = command.enabled === false;
-        var active = status === "starting" || status === "running" || status === "stopping";
         var rowBusy = busy !== null;
         var canAct = projectPath !== undefined && projectPath !== null && projectPath !== "";
-        // 配置里已不存在的历史 runner：可以停止，但不能按旧 commandId 再启动。
-        var canStart = canAct && row.runnerOnly !== true;
         var declaredPorts = Array.isArray(command.ports) ? command.ports : [];
         var actualPorts = current !== null && current !== undefined && Array.isArray(current.actualPorts)
           ? current.actualPorts
@@ -2726,6 +2820,21 @@ window.__ModuleLoader__.load({
             meta.push(h("span", { key: "external-window", className: "dshRunnerStatusText", title: externalOccupant.windowTitle }, "窗口：" + externalOccupant.windowTitle));
           }
         }
+        if (adoptedExternal && typeof current.pid === "number") {
+          meta.push(h("span", {
+            key: "adopted-pid",
+            className: "dshRunnerStatusText",
+            title: "这个进程是插件外部启动的，插件只接管了它的归属（可按 PID 停止/重启）"
+          }, "外部 PID " + String(current.pid)));
+        }
+        var rowActions = rowActionsFor({
+          status: status,
+          hasRunner: hasRunner,
+          external: external !== undefined,
+          canAct: canAct,
+          disabled: disabled,
+          runnerOnly: row.runnerOnly === true
+        });
         return h("div", {
           key: rowKey,
           className: "dshRunnerRow",
@@ -2746,6 +2855,12 @@ window.__ModuleLoader__.load({
               h("span", { className: "dshRunnerRowTitleText", title: String(command.title) }, String(command.title)),
               command.scope === "global" ? h("span", { className: "dshLimobTag" }, "全局") : null,
               disabled ? h("span", { className: "dshLimobTag" }, "已停用") : null,
+              adoptedExternal
+                ? h("span", {
+                    className: "dshRunnerTagExternal",
+                    title: "该实例不是本插件启动的，已纳入托管：可以停止/重启，但无法回放它的输出"
+                  }, "外部接管")
+                : null,
               h("span", { className: "dshRunnerStateText", "data-status": status }, runnerStatusText(status))),
             h("div", { className: "dshRunnerRowCmd", title: String(command.command) }, String(command.command)),
             h("div", { className: "dshRunnerRowMeta" },
@@ -2771,19 +2886,22 @@ window.__ModuleLoader__.load({
             h("button", {
               type: "button",
               className: "dshRunnerMiniBtn",
-              "data-action": !hasRunner && external !== undefined && !externalIsProcess ? "kill-and-start" : "start",
-              disabled: rowBusy || disabled || active || !canStart || externalIsProcess,
+              "data-action": rowActions.adopt ? "adopt" : "start",
+              title: rowActions.adopt
+                ? "把这个外部实例纳入托管（只改归属，不结束进程），之后就能在面板里停止/重启它"
+                : "启动命令",
+              disabled: rowBusy || !(rowActions.adopt || rowActions.start),
               onClick: function (event) {
                 event.stopPropagation();
-                if (!hasRunner && external !== undefined && !externalIsProcess) openExternalConflict(external, command.id, projectPath);
+                if (rowActions.adopt) runAdopt(command.id, projectPath, external);
                 else runAction("start", command.id, projectPath);
               }
-            }, !hasRunner && external !== undefined && !externalIsProcess ? "结束并启动" : "启动"),
+            }, rowActions.adopt ? "接管" : "启动"),
             h("button", {
               type: "button",
               className: "dshRunnerMiniBtn",
               "data-action": "stop",
-              disabled: rowBusy || current === null || current === undefined || !active || !canAct,
+              disabled: rowBusy || !rowActions.stop,
               onClick: function (event) {
                 event.stopPropagation();
                 runAction("stop", command.id, projectPath);
@@ -2793,10 +2911,14 @@ window.__ModuleLoader__.load({
               type: "button",
               className: "dshRunnerMiniBtn",
               "data-action": "restart",
-              disabled: rowBusy || disabled || (!hasRunner && external !== undefined) || !canStart,
+              title: rowActions.adopt
+                ? "结束当前外部实例，改由插件启动（之后可看实时日志）"
+                : "先停止再重新启动",
+              disabled: rowBusy || !rowActions.restart,
               onClick: function (event) {
                 event.stopPropagation();
-                runAction("restart", command.id, projectPath);
+                if (!hasRunner && external !== undefined) openExternalConflict(external, command.id, projectPath, "restart");
+                else runAction("restart", command.id, projectPath);
               }
             }, "重启")));
       }
@@ -2916,6 +3038,12 @@ window.__ModuleLoader__.load({
       // 「还没读到」和「读到了但是空」是两件事：前者说读取中，后者才说暂无日志
       var logPending = selected !== null && selected !== undefined && (logState === null || logState === undefined);
       var logMeta = formatBytes(logBytes) + (logTruncated ? " · 仅显示末尾 " + formatBytes(LOG_MAX_BYTES) : "");
+      // 选中的命令是「外部接管」实例时，日志区必须说清楚：这段内容不是它的实时输出。
+      var selectedRunner = selected === null || selected === undefined
+        ? undefined
+        : runnerByKey[compositeKey(selectedProjectPath, selected.commandId)];
+      var selectedAdoptedExternal = selectedRunner !== undefined && selectedRunner.external === true;
+      var selectedAdoptedPid = selectedAdoptedExternal && typeof selectedRunner.pid === "number" ? selectedRunner.pid : null;
 
       var logPane = h("div", { className: "dshRunnerLogPane" },
         h("div", { className: "dshRunnerLogHead" },
@@ -2923,6 +3051,14 @@ window.__ModuleLoader__.load({
             selectedTitle === "" ? "日志" : selectedTitle + " · 日志"),
           selectedProjectPath === "" ? null : h("span", { className: "dshRunnerLogMeta", title: selectedProjectPath }, selectedProjectPath),
           h("span", { className: "dshRunnerLogMeta" }, logMeta),
+          selectedAdoptedExternal ? h("button", {
+            type: "button",
+            className: "dshRunnerMiniBtn",
+            "data-action": "release-takeover",
+            disabled: busy !== null,
+            title: "不结束进程，只把这条命令移出托管；之后它重新显示为「外部运行中」",
+            onClick: function () { releaseAdopted(selectedProjectPath, selected.commandId); }
+          }, "取消接管") : null,
           h("button", {
             type: "button",
             className: "dshRunnerMiniBtn",
@@ -2934,7 +3070,10 @@ window.__ModuleLoader__.load({
             className: "dshRunnerMiniBtn",
             disabled: logText === "",
             onClick: copyLog
-          }, copied ? "已复制" : "复制")),
+          }, copied ? "已复制" : "复制"),
+          selectedAdoptedExternal ? h("div", { className: "dshRunnerLogNote", "data-external-log": "1" },
+            "外部接管实例" + (selectedAdoptedPid === null ? "" : "（PID " + String(selectedAdoptedPid) + "）")
+              + "：它不是插件启动的，输出无法回放，下面只是此前托管运行留下的日志。点「重启」改由插件启动后即可看实时日志。") : null),
         h("pre", {
           className: "dshRunnerPre",
           "data-dsh-runner-log": "1",
@@ -2973,6 +3112,19 @@ window.__ModuleLoader__.load({
           children !== "" ? h("div", { className: "dshRunnerConflictMeta" }, "子进程：" + children) : null);
       }
 
+      /** 进程型外部实例（没有端口可列，例如 Tauri 客户端）。 */
+      function renderConflictProcess(item, index) {
+        var name = item !== null && item !== undefined && typeof item.name === "string" && item.name !== "" ? item.name : "进程";
+        var pid = item !== null && item !== undefined && typeof item.pid === "number" ? item.pid : null;
+        var commandLine = item !== null && item !== undefined && typeof item.commandLine === "string" ? item.commandLine : "";
+        return h("div", { key: "conflict-pid-" + String(index), className: "dshRunnerConflictEntry", "data-pid": pid === null ? "" : String(pid) },
+          h("div", { className: "dshRunnerConflictHead" },
+            h("span", { className: "dshRunnerConflictPort" }, "进程"),
+            h("span", null, name + (pid === null ? "" : "（PID " + String(pid) + "）")),
+            h("span", { className: "dshRunnerConflictTag" }, "外部进程")),
+          commandLine !== "" ? h("div", { className: "dshRunnerConflictCode", title: commandLine }, commandLine) : null);
+      }
+
       var conflictDialog = conflict === null || conflict === undefined ? null : h("div", {
         className: "dshRunnerDialogBackdrop",
         onMouseDown: function (event) {
@@ -2980,21 +3132,27 @@ window.__ModuleLoader__.load({
         }
       },
         h("div", { className: "dshRunnerDialog", "data-dsh-runner-conflict": "1" },
-          h("div", { className: "dshRunnerDialogHead" }, "端口被占用"),
+          h("div", { className: "dshRunnerDialogHead" }, conflict.takeOver === true ? "外部实例正在运行" : "端口被占用"),
           h("div", { className: "dshRunnerDialogSub" },
             "项目：" + String(conflict.projectPath === undefined ? "未知" : conflict.projectPath)),
           h("div", { className: "dshRunnerDialogSub" },
-            conflict.kind === "port-mismatch"
-              ? "「" + titleOfCommand(conflict.commandId) + "」未能绑定声明端口，本次启动已终止"
-                + (Array.isArray(conflict.actualPorts) && conflict.actualPorts.length > 0
-                  ? "（实际绑定了 " + conflict.actualPorts.map(String).join("、") + "）"
-                  : "")
-                + "。处理以下占用后可重试启动。"
-              : "启动「" + titleOfCommand(conflict.commandId) + "」需要先处理以下端口占用。确认后会结束外部占用进程 / 停止对应托管命令，并自动重试启动。"),
+            conflict.takeOver === true
+              ? "「" + titleOfCommand(conflict.commandId) + "」现在运行的是插件之外启动的实例。"
+                + "确认后会结束它，再按托管方式重新启动——之后这个面板就能看实时日志、按端口/进程管理它。"
+              : (conflict.kind === "port-mismatch"
+                ? "「" + titleOfCommand(conflict.commandId) + "」未能绑定声明端口，本次启动已终止"
+                  + (Array.isArray(conflict.actualPorts) && conflict.actualPorts.length > 0
+                    ? "（实际绑定了 " + conflict.actualPorts.map(String).join("、") + "）"
+                    : "")
+                  + "。处理以下占用后可重试启动。"
+                : "启动「" + titleOfCommand(conflict.commandId) + "」需要先处理以下端口占用。确认后会结束外部占用进程 / 停止对应托管命令，并自动重试启动。")),
           (Array.isArray(conflict.ports) ? conflict.ports : []).map(renderConflictEntry),
+          (Array.isArray(conflict.processes) ? conflict.processes : []).map(renderConflictProcess),
           conflictError !== null ? h("div", { className: "dshRunnerDialogError", "data-dsh-runner-error": "1" },
             messageOf(conflictError) + (errorDetailText(conflictError) !== "" ? " · " + errorDetailText(conflictError) : "")) : null,
-          conflictBusy ? h("div", { className: "dshRunnerDialogBusy" }, "正在处理端口占用并重试启动…") : null,
+          conflictBusy
+            ? h("div", { className: "dshRunnerDialogBusy" }, conflict.takeOver === true ? "正在结束外部实例并重启…" : "正在处理端口占用并重试启动…")
+            : null,
           h("div", { className: "dshRunnerDialogActions" },
             h("button", {
               type: "button",
@@ -3006,10 +3164,10 @@ window.__ModuleLoader__.load({
             h("button", {
               type: "button",
               className: "dshLimobCfgBtn dshLimobCfgBtnPrimary",
-              "data-action": "kill-and-start",
+              "data-action": conflict.takeOver === true ? "takeover-restart" : "kill-and-start",
               disabled: conflictBusy,
               onClick: resolveConflict
-            }, conflictBusy ? "处理中…" : "结束占用进程并启动"))));
+            }, conflictBusy ? "处理中…" : (conflict.takeOver === true ? "结束外部实例并重启" : "结束占用进程并启动")))));
 
       var editorModal = !editorOpen ? null : h("div", {
         className: "dshLimobCfgModalBackdrop",
@@ -3901,6 +4059,7 @@ window.__ModuleLoader__.load({
       isProjectCollapsed: isProjectCollapsed,
       projectColorOf: projectColorOf,
       headerActionsFor: headerActionsFor,
+      rowActionsFor: rowActionsFor,
       toggleCollapsedProject: toggleCollapsedProject,
       occupantSummary: occupantSummary,
       formatProcessChain: formatProcessChain,

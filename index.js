@@ -55,6 +55,8 @@ const RPC_ENDPOINTS = [
   "project/stopAll",
   "project/diagnose",
   "project/killPort",
+  "project/adopt",
+  "project/release",
   "project/log",
   "project/log/clear"
 ];
@@ -231,6 +233,14 @@ function fail(code, message, details) {
   return { ok: false, error: { code: code, message: message, details: details === undefined ? {} : details } };
 }
 
+/**
+ * AI Tool 的输出必须是 lossless JSON（DSH 会校验）：
+ * 对象里出现 undefined / 非普通对象会被整条判为无效，这里统一做一次 JSON 往返。
+ */
+function jsonSafe(value) {
+  return JSON.parse(JSON.stringify(value === undefined ? null : value));
+}
+
 /** 把内部错误映射成 RPC 结构化错误（未知错误一律 internal）。 */
 function toRpcError(error) {
   if (error instanceof RpcError) return error;
@@ -375,7 +385,11 @@ async function dispatch(runner, endpoint, payload, logger) {
     const command = findRunnableCommand(loaded.config, commandId);
     assertCommandProject(command, projectPath);
     await runner.refresh();
-    const restarted = await runner.restart(command, projectPath, { commands: loaded.config.commands });
+    const restarted = await runner.restart(command, projectPath, {
+      commands: loaded.config.commands,
+      // 外部运行中的实例：确认后先结束外部进程，再按托管方式启动（之后才有实时日志）。
+      takeOverExternal: data.takeOver === true
+    });
     return { runner: restarted, runners: runner.list(projectPath) };
   }
   if (endpoint === "project/startAll") {
@@ -405,6 +419,31 @@ async function dispatch(runner, endpoint, payload, logger) {
     }
     const result = await runner.killPort(projectPath, data.port, data.pid === undefined || data.pid === null ? undefined : data.pid);
     return { killed: result.killed, pid: result.pid, occupant: result.occupant };
+  }
+  if (endpoint === "project/adopt") {
+    const projectPath = requireProjectPath(data);
+    const commandId = requireCommandId(data);
+    const loaded = await loadHostConfig(logger);
+    const command = findRunnableCommand(loaded.config, commandId);
+    assertCommandProject(command, projectPath);
+    await runner.refresh();
+    const adopted = await runner.adopt(command, projectPath, {
+      pid: Number.isInteger(data.pid) ? data.pid : undefined
+    });
+    return {
+      runner: adopted.runner,
+      adopted: adopted.adopted === true,
+      reason: adopted.reason,
+      warning: typeof adopted.warning === "string" ? adopted.warning : "",
+      runners: runner.list(projectPath)
+    };
+  }
+  if (endpoint === "project/release") {
+    const projectPath = requireProjectPath(data);
+    const commandId = requireCommandId(data);
+    await runner.refresh();
+    const released = await runner.release(projectPath, commandId);
+    return { released: released, runners: runner.list(projectPath) };
   }
   if (endpoint === "project/log") {
     const projectPath = requireProjectPath(data);
@@ -586,6 +625,10 @@ function registerRunTool(ctx, runner, logger) {
       + "action=status shows the project's runners; start/stop/restart operate one command; "
       + "startAll starts every enabled project-scope command in dependency order; stopAll stops them all; "
       + "diagnose reports TCP ports occupied by non-managed processes (process name/PID/window title/parent chain); "
+      + "adopt takes over an externally running instance of a command (it appears in the run panel and can then be stopped/restarted; "
+      + "its stdout cannot be replayed, so use restart to relaunch it under management and get live logs); "
+      + "release gives an adopted external instance back without killing it; "
+      + "restart with takeOver=true first ends the command's external instances (port occupants + processes under its cwd) and then starts it managed; "
       + "killPort ends a confirmed non-managed port occupant (optionally verifying its pid); log returns the tail of a command's log. "
       + "Use this Tool to start and stop long-running services (dev servers, watchers, backends). "
       + "Do NOT use terminal tools for long-running services — terminal tools are for short-lived commands; "
@@ -595,13 +638,14 @@ function registerRunTool(ctx, runner, logger) {
       action: {
         type: "string",
         required: true,
-        enum: ["status", "start", "stop", "restart", "startAll", "stopAll", "diagnose", "killPort", "log"],
-        description: "status | start | stop | restart | startAll | stopAll | diagnose | killPort | log"
+        enum: ["status", "start", "stop", "restart", "startAll", "stopAll", "diagnose", "killPort", "adopt", "release", "log"],
+        description: "status | start | stop | restart | startAll | stopAll | diagnose | killPort | adopt | release | log"
       },
       projectPath: { type: "string", description: "Project path; defaults to the workspace that owns the current session." },
-      commandId: { type: "string", description: "Command id for start/stop/restart/log; get it from dsh_runner_config action=list." },
+      commandId: { type: "string", description: "Command id for start/stop/restart/adopt/release/log; get it from dsh_runner_config action=list." },
       port: { type: "integer", description: "killPort only: TCP port whose non-managed occupant should be ended." },
-      pid: { type: "integer", description: "killPort only: expected occupant pid from diagnose; rejects if the port changed hands." },
+      pid: { type: "integer", description: "killPort/adopt only: expected occupant pid from diagnose; rejects if the port/instance changed hands." },
+      takeOver: { type: "boolean", description: "restart only: end the command's external instances first, then start it managed (default false)." },
       maxBytes: { type: "integer", description: "log only: max bytes of the tail to read (1024-1048576), default 65536." }
     },
     output: {
@@ -628,7 +672,10 @@ function registerRunTool(ctx, runner, logger) {
         await runner.refresh();
         const runnerSnapshot = args.action === "start"
           ? await runner.start(command, projectPath, { commands: loaded.config.commands })
-          : await runner.restart(command, projectPath, { commands: loaded.config.commands });
+          : await runner.restart(command, projectPath, {
+            commands: loaded.config.commands,
+            takeOverExternal: args.takeOver === true
+          });
         return { runner: runnerSnapshot, runners: runner.list(projectPath) };
       }
       if (args.action === "stop") {
@@ -651,7 +698,8 @@ function registerRunTool(ctx, runner, logger) {
       if (args.action === "diagnose") {
         const loaded = await loadHostConfig(logger);
         const entries = await runner.diagnose(loaded.config.commands, projectPath);
-        return { entries: entries };
+        // 进程快照是任意系统进程的信息，字段随平台变化：统一 JSON 化后再返回。
+        return jsonSafe({ entries: entries });
       }
       if (args.action === "killPort") {
         if (!Number.isInteger(args.port) || args.port < 0 || args.port > 65535) {
@@ -662,6 +710,28 @@ function registerRunTool(ctx, runner, logger) {
         }
         const result = await runner.killPort(projectPath, args.port, args.pid === undefined || args.pid === null ? undefined : args.pid);
         return { killed: result.killed, pid: result.pid, occupant: result.occupant };
+      }
+      if (args.action === "adopt" || args.action === "release") {
+        const commandId = typeof args.commandId === "string" ? args.commandId.trim() : "";
+        if (commandId === "") throw new Error(args.action + " 需要 commandId");
+        await runner.refresh();
+        if (args.action === "release") {
+          const released = await runner.release(projectPath, commandId);
+          return { released: released, runners: runner.list(projectPath) };
+        }
+        const loaded = await loadHostConfig(logger);
+        const command = findRunnableCommand(loaded.config, commandId);
+        assertCommandProject(command, projectPath);
+        const adopted = await runner.adopt(command, projectPath, {
+          pid: args.pid === undefined || args.pid === null ? undefined : args.pid
+        });
+        return {
+          runner: adopted.runner,
+          adopted: adopted.adopted === true,
+          reason: adopted.reason,
+          warning: typeof adopted.warning === "string" ? adopted.warning : "",
+          runners: runner.list(projectPath)
+        };
       }
       if (args.action === "log") {
         const commandId = typeof args.commandId === "string" ? args.commandId.trim() : "";
