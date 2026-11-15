@@ -43,7 +43,7 @@ window.__ModuleLoader__.load({
     // 一、常量
     // =====================================================================
     var PLUGIN_NAME = "dsh-runner";
-    var PLUGIN_VERSION = "0.25.0";
+    var PLUGIN_VERSION = "0.26.0";
 
     // 左侧导航面板 / main 面板的稳定 id。
     var PANEL_ID = "dsh-runner";
@@ -82,219 +82,1169 @@ window.__ModuleLoader__.load({
     // 二、样式（factory 阶段注入一次，模块系统会随插件卸载清理）
     // =====================================================================
     var STYLE_ID = "dsh-limob-runner-css";
-    var CSS = [
-      // ---- 输入框下方的「运行」按钮与快捷菜单 ----
-      ".dshLimobRunDock{position:relative;display:flex;align-items:center;gap:8px;min-width:0;max-width:100%}",
-      ".dshLimobRunBtn{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 6px;border-radius:6px;border:0;background:transparent;color:var(--dsw-alias-label-secondary,inherit);font:inherit;font-size:11px;line-height:22px;cursor:pointer;white-space:nowrap;user-select:none}",
-      ".dshLimobRunBtn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16));color:inherit}",
-      ".dshLimobRunBtn[data-busy=true]{cursor:progress;opacity:.7}",
-      ".dshLimobRunStatus{display:inline-flex;align-items:center;min-width:0;font-size:11px;line-height:16px;opacity:.8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-      ".dshLimobRunStatus[data-phase=error]{color:#f87171}",
-      ".dshLimobRunMenu{position:fixed;z-index:1000;box-sizing:border-box;min-width:280px;max-width:min(400px,92vw);max-height:min(60vh,520px);overflow:auto;padding:6px;border-radius:11px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));background:var(--dsw-alias-bg-layer-2,#26282c);box-shadow:0 12px 32px rgba(0,0,0,.38);font-family:inherit;font-size:12px;line-height:18px;color:inherit}",
-      ".dshLimobRunMenuTitle{padding:5px 9px 3px;font-size:11px;opacity:.6;user-select:none;display:flex;justify-content:space-between;gap:8px;min-width:0}",
-      ".dshLimobRunMenuTitle > span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-      ".dshLimobRunRow{display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box;padding:6px 8px;border-radius:7px;min-width:0}",
-      ".dshLimobRunRow:hover{background:rgba(103,158,254,.1)}",
-      ".dshLimobRunRowMain{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}",
-      ".dshLimobRunItemTitle{font-size:12px;line-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-      ".dshLimobRunItemCmd{font-size:10px;line-height:14px;opacity:.6;font-family:ui-monospace,Consolas,'Courier New',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-      ".dshLimobRunRowActions{display:flex;align-items:center;gap:2px;flex:none}",
-      ".dshLimobRunSep{height:1px;margin:5px 4px;background:var(--dsw-alias-border-l3,rgba(128,128,128,.3))}",
-      ".dshLimobRunHint{padding:5px 9px 3px;font-size:10px;line-height:15px;opacity:.55;user-select:none}",
-      ".dshLimobRunEmpty{padding:8px 9px;font-size:11px;line-height:16px;opacity:.6}",
-      // ---- 通用小按钮 / 标签 ----
-      ".dshLimobCfgBtn{display:inline-flex;align-items:center;justify-content:center;gap:4px;height:24px;padding:0 9px;border-radius:6px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));background:transparent;color:inherit;font:inherit;font-size:11px;line-height:22px;cursor:pointer;white-space:nowrap}",
-      ".dshLimobCfgBtn:hover:not([disabled]){background:rgba(103,158,254,.12)}",
-      ".dshLimobCfgBtn[disabled]{opacity:.45;cursor:default}",
-      ".dshLimobCfgBtnPrimary{border-color:rgba(103,158,254,.55);background:rgba(103,158,254,.16);color:#679efe}",
-      ".dshLimobCfgBtnPrimary:hover:not([disabled]){background:rgba(103,158,254,.24)}",
-      ".dshLimobCfgBtnDanger{border-color:rgba(239,68,68,.45);color:#f87171}",
-      ".dshLimobCfgBtnDanger:hover:not([disabled]){background:rgba(239,68,68,.12)}",
-      ".dshLimobCfgBtnGhost{border:0;padding:0 6px;height:22px;opacity:.72}",
-      ".dshLimobCfgBtnGhost:hover:not([disabled]){opacity:1;background:rgba(128,128,128,.12)}",
-      ".dshLimobIconBtn{width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:13px;line-height:1;cursor:pointer;opacity:.6}",
-      ".dshLimobIconBtn:hover:not([disabled]){background:rgba(128,128,128,.16);opacity:1}",
-      ".dshLimobIconBtn[disabled]{opacity:.25;cursor:default}",
-      ".dshLimobIconBtn[data-danger=true]:hover:not([disabled]){background:rgba(239,68,68,.14);color:#f87171}",
-      ".dshLimobTag{flex:none;padding:0 5px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));font-size:9px;line-height:14px;opacity:.8;white-space:nowrap;max-width:46%;overflow:hidden;text-overflow:ellipsis}",
-      ".dshLimobTag[data-scope=project]{border-color:rgba(103,158,254,.45);color:#679efe;background:rgba(103,158,254,.08)}",
-      // ---- 设置页 / 配置编辑器 ----
-      ".dshLimobCfgPage{display:flex;flex-direction:column;gap:10px;width:100%;max-width:100%;padding:0 0 18px;font-size:12px;line-height:18px;color:inherit;box-sizing:border-box}",
-      ".dshLimobPageHead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:2px 2px 9px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35))}",
-      ".dshLimobPageTitle{font-size:15px;font-weight:600;line-height:22px}",
-      ".dshLimobPageSub{font-size:11px;line-height:16px;opacity:.6;margin-top:2px}",
-      ".dshLimobPageVersion{font-size:10px;line-height:16px;opacity:.4;flex:none;padding-top:3px}",
-      ".dshLimobCfg{display:flex;flex-direction:column;gap:10px;min-width:0}",
-      ".dshLimobCfgToolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}",
-      ".dshLimobCfgStat{flex:1 1 160px;min-width:0;font-size:11px;line-height:16px;opacity:.62;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-      ".dshLimobSwitch{display:inline-flex;align-items:center;gap:6px;font-size:11px;line-height:16px;opacity:.85;user-select:none;cursor:pointer;position:relative;white-space:nowrap}",
-      ".dshLimobSwitch input{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}",
-      ".dshLimobSwitchTrack{width:26px;height:15px;border-radius:999px;background:rgba(128,128,128,.35);position:relative;flex:none;transition:background .15s}",
-      ".dshLimobSwitchTrack::after{content:\"\";position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;background:#fff;transition:left .15s}",
-      ".dshLimobSwitch input:checked + .dshLimobSwitchTrack{background:#679efe}",
-      ".dshLimobSwitch input:checked + .dshLimobSwitchTrack::after{left:13px}",
-      ".dshLimobCmdList{display:flex;flex-direction:column;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));border-radius:10px;overflow:hidden;background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.05))}",
-      ".dshLimobCmdRow{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.22));min-width:0}",
-      ".dshLimobCmdRow:last-child{border-bottom:0}",
-      ".dshLimobCmdRow:hover{background:rgba(103,158,254,.06)}",
-      ".dshLimobCmdRow[data-disabled=true]{opacity:.55}",
-      ".dshLimobCmdMain{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1;cursor:pointer}",
-      ".dshLimobCmdTitleLine{display:flex;align-items:center;gap:6px;min-width:0}",
-      ".dshLimobCmdTitle{font-size:12px;font-weight:500;line-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-      ".dshLimobCmdPreview{font-size:10px;line-height:14px;opacity:.5;font-family:ui-monospace,Consolas,'Courier New',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-      ".dshLimobCmdActions{display:flex;align-items:center;gap:2px;flex:none}",
-      ".dshLimobCfgEmpty{padding:18px 12px;text-align:center;font-size:11px;opacity:.55}",
-      ".dshLimobCfgForm{border:.5px solid rgba(103,158,254,.35);border-radius:10px;background:rgba(103,158,254,.05);padding:11px 12px;display:flex;flex-direction:column;gap:9px}",
-      ".dshLimobCfgFormTop{display:flex;align-items:center;justify-content:space-between;gap:8px}",
-      ".dshLimobCfgFormTitle{font-size:12px;font-weight:600;line-height:17px}",
-      ".dshLimobFormGrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}",
-      ".dshLimobFormField{display:flex;flex-direction:column;gap:3px;min-width:0}",
-      ".dshLimobFormField[data-wide=true]{grid-column:1 / -1}",
-      ".dshLimobFormField > span{font-size:10px;line-height:14px;opacity:.6}",
-      ".dshLimobInput,.dshLimobTextarea,.dshLimobSelect{width:100%;box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.4));border-radius:6px;background:var(--dsw-alias-bg-base,transparent);color:inherit;font:inherit;font-size:12px;padding:5px 8px;min-width:0}",
-      ".dshLimobTextarea{min-height:46px;resize:vertical;font-family:ui-monospace,Consolas,'Courier New',monospace;font-size:11px;line-height:16px}",
-      ".dshLimobSegment{display:inline-flex;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.4));border-radius:6px;overflow:hidden;flex:none}",
-      ".dshLimobSegment button{border:0;background:transparent;color:inherit;font:inherit;font-size:11px;line-height:20px;padding:2px 10px;cursor:pointer;opacity:.7}",
-      ".dshLimobSegment button[data-active=true]{background:rgba(103,158,254,.16);color:#679efe;opacity:1}",
-      ".dshLimobFormRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}",
-      ".dshLimobFormRow .dshLimobSelect{flex:1 1 180px}",
-      ".dshLimobLinkBtn{border:0;background:transparent;color:#679efe;font:inherit;font-size:10px;line-height:16px;padding:0;cursor:pointer;opacity:.85}",
-      ".dshLimobLinkBtn:hover{opacity:1;text-decoration:underline}",
-      ".dshLimobFormFoot{display:flex;align-items:center;gap:8px;justify-content:flex-end;min-height:24px}",
-      ".dshLimobFormError{color:#f87171;font-size:11px;line-height:16px;margin-right:auto;word-break:break-word}",
-      ".dshLimobCfgError{color:#f87171;font-size:11px;line-height:16px;word-break:break-word}",
-      ".dshLimobCfgNotice{color:#22c55e;font-size:11px;line-height:16px}",
-      ".dshLimobFieldHint{font-size:10px;line-height:14px;opacity:.5;margin-top:2px}",
-      ".dshLimobDepList{display:flex;flex-wrap:wrap;gap:4px 12px;padding:2px 0 0}",
-      ".dshLimobDepItem{display:inline-flex;align-items:center;gap:4px;font-size:11px;line-height:16px;opacity:.85;cursor:pointer;max-width:100%}",
-      ".dshLimobDepItem span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-      ".dshLimobCfgModalBackdrop{pointer-events:auto;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.42);display:flex;align-items:center;justify-content:center;padding:20px}",
-      ".dshLimobCfgModal{box-sizing:border-box;width:min(760px,94vw);max-height:min(86vh,820px);overflow:auto;border-radius:12px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));background:var(--dsw-alias-bg-layer-2,#26282c);box-shadow:0 18px 48px rgba(0,0,0,.45);padding:14px}",
-      ".dshLimobCfgH{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;font-weight:600}",
-      // ---- 运行面板 ----
-      ".dshRunnerPage{display:flex;flex-direction:column;gap:10px;box-sizing:border-box;width:100%;height:100%;min-height:0;padding:12px 14px;font-size:12px;line-height:18px;color:inherit}",
-      ".dshRunnerHead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-bottom:8px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));min-width:0}",
-      ".dshRunnerHeadMain{display:flex;align-items:baseline;gap:8px;min-width:0;flex:1 1 240px}",
-      ".dshRunnerTitle{font-size:14px;font-weight:600;line-height:20px;flex:none}",
-      ".dshRunnerProject{font-size:11px;line-height:16px;opacity:.6;font-family:ui-monospace,Consolas,'Courier New',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}",
-      ".dshRunnerToolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:none}",
-      ".dshRunnerBody{display:grid;grid-template-columns:minmax(300px,42%) minmax(0,1fr);gap:10px;flex:1;min-height:0}",
-      "@media (max-width:860px){.dshRunnerBody{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,auto) minmax(160px,1fr)}}",
-      ".dshRunnerList{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:auto;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));border-radius:10px;background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.05))}",
-      ".dshRunnerSection{display:flex;flex-direction:column;gap:2px;flex:none;margin-bottom:8px}",
-      ".dshRunnerSectionHead{display:flex;align-items:center;gap:8px;padding:4px 8px;border:none;border-radius:8px}",
-      ".dshRunnerColorSwatch{flex:none;width:10px;height:10px;border-radius:50%;border:none;padding:0;cursor:pointer;opacity:.9}",
-      ".dshRunnerColorSwatch:hover{opacity:1}",
-      ".dshRunnerColorRow{display:flex;align-items:center;gap:5px;padding:2px 8px 6px;flex-wrap:wrap}",
-      ".dshRunnerColorChip{width:14px;height:14px;border-radius:50%;border:none;padding:0;cursor:pointer;opacity:.85}",
-      ".dshRunnerColorChip:hover{opacity:1;transform:scale(1.08)}",
-      ".dshRunnerColorAuto{font-size:10px;line-height:14px;padding:1px 6px;border-radius:999px;border:none;background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.16));color:inherit;opacity:.7;cursor:pointer}",
-      ".dshRunnerColorAuto:hover{opacity:1}",
-      ".dshRunnerSectionInfo{display:flex;align-items:baseline;gap:6px;min-width:0;flex:1 1 auto}",
-      ".dshRunnerSectionTitle{font-size:11px;font-weight:600;line-height:16px;white-space:nowrap}",
-      ".dshRunnerSectionPath{font-size:10px;line-height:15px;opacity:.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1 1 auto;font-family:ui-monospace,Consolas,'Courier New',monospace}",
-      ".dshRunnerSectionCount{font-size:10px;line-height:15px;opacity:.6;white-space:nowrap}",
-      ".dshRunnerSectionActions{display:flex;gap:4px;flex:none}",
-      ".dshRunnerSectionToggle{flex:none;width:16px;height:16px;padding:0;border:none;background:none;color:inherit;opacity:.65;font-size:10px;line-height:16px;cursor:pointer}",
-      ".dshRunnerSectionToggle:hover{opacity:1}",
-      ".dshRunnerSectionIssue{font-size:10px;line-height:15px;color:#f59e0b;white-space:nowrap}",
-      ".dshRunnerSectionEmpty{font-size:11px;line-height:16px;opacity:.55;padding:6px 8px}",
-      ".dshRunnerGlobalSummary{font-size:10px;line-height:15px;opacity:.6;white-space:nowrap}",
-      ".dshRunnerHeaderFloat{position:fixed;transform:translate(-50%,-50%);z-index:9999;display:flex;align-items:center;justify-content:center;gap:4px;overflow:hidden;pointer-events:none;-webkit-app-region:no-drag}",
-      ".dshRunnerHeaderChip{pointer-events:auto;-webkit-app-region:no-drag}",
-      ".dshRunnerHeaderActions{display:inline-flex;align-items:center;gap:2px;flex:none;-webkit-app-region:no-drag}",
-      ".dshRunnerHeaderBtn{width:18px;height:18px;padding:0;border:none;border-radius:999px;background:rgba(128,128,128,.2);color:inherit;font-size:10px;line-height:18px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;-webkit-app-region:no-drag}",
-      ".dshRunnerHeaderBtn:hover{background:rgba(128,128,128,.34)}",
-      ".dshRunnerHeaderBtn:disabled{opacity:.45;cursor:default}",
-      ".dshRunnerHeaderFloat .dshRunnerDot{margin-top:0;align-self:center}",
+    var CSS = `
+/* ============================================================================
+ * dsh-runner 视觉系统（0.26.0）
+ *
+ * 设计原则：
+ *  1. 只用 DSH 主题 token 推导表面/描边/文字色，深色与浅色同一套规则；
+ *  2. 层级靠「留白 + 中性填充」表达，不靠彩色背景条和重描边；
+ *  3. 状态色只用于状态（运行/失败/外部/警告），主按钮用品牌单色；
+ *  4. 图标全部是 16 网格线性 SVG，不用文字符号当图标；
+ *  5. 4px 间距节奏，控件尺寸统一（22/26/28px），焦点态、禁用态、加载态齐全。
+ * ========================================================================== */
 
-      // ---- 顶部 chip 的实时日志气泡（悬停显示，不占布局）----
-      ".dshRunnerLogBubble{position:fixed;z-index:10001;display:flex;flex-direction:column;max-height:min(48vh,380px);border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.42));border-radius:10px;background:var(--dsw-alias-bg-layer-1,#1f1f22);box-shadow:0 16px 44px rgba(0,0,0,.5);overflow:hidden;pointer-events:auto;-webkit-app-region:no-drag;font-size:11px;line-height:16px;color:inherit;text-align:left}",
-      ".dshRunnerLogBubbleHead{display:flex;align-items:center;gap:6px;min-width:0;padding:6px 9px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.3));flex:none;white-space:nowrap}",
-      ".dshRunnerLogBubbleHead .dshRunnerDot{margin-top:0;align-self:center}",
-      ".dshRunnerLogBubbleTitle{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto}",
-      ".dshRunnerLogBubbleMeta{font-size:10px;opacity:.65;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}",
-      ".dshRunnerLogBubbleLive{margin-left:auto;flex:none;font-size:10px;color:#22c55e}",
-      ".dshRunnerLogBubbleBody{flex:1 1 auto;min-height:96px;max-height:min(42vh,330px);margin:0;padding:7px 9px;overflow:auto;font-family:ui-monospace,Consolas,'Courier New',monospace;font-size:10.5px;line-height:15px;white-space:pre-wrap;word-break:break-all;background:rgba(0,0,0,.22);color:inherit;user-select:text}",
-      ".dshRunnerLogBubbleEmpty{padding:14px 10px;font-size:10.5px;line-height:16px;opacity:.55}",
-      ".dshRunnerLogBubbleError{padding:10px;font-size:10.5px;line-height:16px;color:#f87171;word-break:break-word}",
+/* ---- 0. 令牌 ---- */
+.dshRunnerPage,
+.dshRunnerHeaderFloat,
+.dshRunnerLogBubble,
+.dshRunnerDialog,
+.dshLimobCfgPage,
+.dshLimobCfgModal,
+.dshLimobRunDock,
+.dshLimobRunMenu,
+.dshLimobDetailSection {
+  --drr-surface: var(--dsw-alias-bg-base);
+  --drr-raised: color-mix(in srgb, var(--dsw-alias-label-primary) 4%, var(--dsw-alias-bg-base));
+  --drr-fill-1: color-mix(in srgb, var(--dsw-alias-label-primary) 6%, transparent);
+  --drr-fill-2: color-mix(in srgb, var(--dsw-alias-label-primary) 10%, transparent);
+  --drr-fill-3: color-mix(in srgb, var(--dsw-alias-label-primary) 15%, transparent);
+  --drr-line: var(--dsw-alias-border-l1);
+  --drr-line-2: var(--dsw-alias-border-l2);
+  --drr-line-3: var(--dsw-alias-border-l3);
+  --drr-text: var(--dsw-alias-label-primary);
+  --drr-text-2: var(--dsw-alias-label-secondary);
+  --drr-text-3: var(--dsw-alias-label-tertiary);
+  --drr-brand: var(--dsw-alias-brand-primary);
+  --drr-on-brand: var(--dsw-alias-bg-base);
+  --drr-ok: var(--dsw-alias-state-success-primary);
+  --drr-warn: var(--dsw-alias-state-warn-primary);
+  --drr-error: var(--dsw-alias-state-error-primary);
+  --drr-idle: var(--dsw-alias-state-idle-primary);
+  --drr-ok-ink: color-mix(in srgb, var(--drr-ok) 52%, var(--drr-text));
+  --drr-warn-ink: color-mix(in srgb, var(--drr-warn) 55%, var(--drr-text));
+  --drr-error-ink: color-mix(in srgb, var(--drr-error) 70%, var(--drr-text));
+  --drr-r-xs: 6px;
+  --drr-r-sm: 8px;
+  --drr-r-md: 10px;
+  --drr-r-lg: 14px;
+  --drr-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Segoe UI Mono", Consolas, "Liberation Mono", monospace;
+  --drr-ease: cubic-bezier(.22, .61, .36, 1);
+  --drr-ease-in-out: cubic-bezier(.4, 0, .2, 1);
+  /* 阴影只声明一次：颜色随 color-scheme 走，浅色下更轻，深色下更深 */
+  --drr-shadow-1: light-dark(rgba(15, 17, 21, .16), rgba(0, 0, 0, .55));
+  --drr-shadow-2: light-dark(rgba(15, 17, 21, .09), rgba(0, 0, 0, .35));
+  --drr-shadow-pop: 0 18px 44px -14px var(--drr-shadow-1), 0 4px 12px -6px var(--drr-shadow-2);
+  --drr-shadow-sm: 0 1px 2px light-dark(rgba(15, 17, 21, .12), rgba(0, 0, 0, .25));
+}
 
-      ".dshRunnerHeaderChip{display:inline-flex;align-items:center;gap:4px;flex:0 1 auto;min-width:48px;padding:1px 8px;border:none;border-radius:999px;background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.16));backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-size:10px;line-height:16px;white-space:nowrap;overflow:hidden}",
-      ".dshRunnerHeaderName{font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-      ".dshRunnerHeaderProject{opacity:.55;flex:none;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-      ".dshRunnerHeaderState{opacity:.65;flex:none;white-space:nowrap}",
-      ".dshRunnerHeaderState[data-status=running]{color:#22c55e;opacity:1}",
-      ".dshRunnerHeaderState[data-status=queued]{color:#94a3b8;opacity:1}",
-      ".dshRunnerHeaderState[data-status=starting],.dshRunnerHeaderState[data-status=stopping]{color:#f59e0b;opacity:1}",
-      ".dshRunnerHeaderState[data-status=failed],.dshRunnerHeaderState[data-status=exited]{color:#f87171;opacity:1}",
-      ".dshRunnerRow{display:flex;align-items:flex-start;gap:7px;padding:8px 10px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.22));min-width:0;cursor:pointer}",
-      ".dshRunnerRow:last-child{border-bottom:0}",
-      ".dshRunnerRow:hover{background:rgba(103,158,254,.06)}",
-      ".dshRunnerRow[data-selected=true]{background:rgba(103,158,254,.12)}",
-      ".dshRunnerRow[data-disabled=true]{opacity:.55}",
-      ".dshRunnerDot{width:7px;height:7px;border-radius:50%;margin-top:6px;flex:none;background:rgba(128,128,128,.6)}",
-      ".dshRunnerDot[data-status=queued]{background:#94a3b8}",
-      ".dshRunnerDot[data-status=starting]{background:#f59e0b}",
-      ".dshRunnerDot[data-status=external]{background:#f59e0b;box-shadow:0 0 0 2px rgba(245,158,11,.25)}",
-      ".dshRunnerDot[data-status=running]{background:#22c55e}",
-      ".dshRunnerDot[data-status=stopping]{background:#f59e0b}",
-      ".dshRunnerDot[data-status=failed]{background:#f87171}",
-      ".dshRunnerDot[data-status=exited]{background:#f87171}",
-      ".dshRunnerRowMain{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}",
-      ".dshRunnerRowTitle{display:flex;align-items:center;gap:5px;min-width:0}",
-      ".dshRunnerRowTitleText{font-size:12px;font-weight:500;line-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}",
-      ".dshRunnerStateText{font-size:10px;line-height:14px;opacity:.65;flex:none;white-space:nowrap}",
-      ".dshRunnerStateText[data-status=running]{color:#22c55e;opacity:1}",
-      ".dshRunnerStateText[data-status=queued]{color:#94a3b8;opacity:1}",
-      ".dshRunnerStateText[data-status=starting],.dshRunnerStateText[data-status=stopping]{color:#f59e0b;opacity:1}",
-      ".dshRunnerStateText[data-status=external]{color:#f59e0b;opacity:1}",
-      ".dshRunnerStateText[data-status=failed],.dshRunnerStateText[data-status=exited]{color:#f87171;opacity:1}",
-      ".dshRunnerRowCmd{font-size:10px;line-height:14px;opacity:.55;font-family:ui-monospace,Consolas,'Courier New',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-      ".dshRunnerRowMeta{display:flex;align-items:center;gap:5px;flex-wrap:wrap;font-size:10px;line-height:14px;opacity:.75;min-width:0}",
-      ".dshRunnerPort{flex:none;padding:0 5px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));font-size:9px;line-height:14px;font-family:ui-monospace,Consolas,'Courier New',monospace}",
-      ".dshRunnerPortWarn{border-color:rgba(245,158,11,.65);color:#f59e0b;background:rgba(245,158,11,.1)}",
-      ".dshRunnerRowActions{display:flex;align-items:center;gap:2px;flex:none}",
-      ".dshRunnerMiniBtn{height:20px;padding:0 6px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));border-radius:5px;background:transparent;color:inherit;font:inherit;font-size:10px;line-height:18px;cursor:pointer;white-space:nowrap}",
-      ".dshRunnerMiniBtn:hover:not([disabled]){background:rgba(103,158,254,.14)}",
-      ".dshRunnerMiniBtn[disabled]{opacity:.35;cursor:default}",
-      ".dshRunnerMiniBtn[data-action=stop]:hover:not([disabled]){background:rgba(239,68,68,.12);color:#f87171}",
-      ".dshRunnerMiniBtn[data-action=adopt]:hover:not([disabled]){background:rgba(245,158,11,.16);color:#f59e0b}",
-      ".dshRunnerTagExternal{flex:none;padding:0 5px;border-radius:999px;border:.5px solid rgba(245,158,11,.55);color:#f59e0b;background:rgba(245,158,11,.1);font-size:9px;line-height:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:46%}",
-      ".dshRunnerEmpty{padding:22px 12px;text-align:center;font-size:11px;line-height:17px;opacity:.55}",
-      ".dshRunnerLogPane{display:flex;flex-direction:column;min-width:0;min-height:0;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));border-radius:10px;background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.05));overflow:hidden}",
-      ".dshRunnerLogHead{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 9px;border-bottom:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));font-size:11px;line-height:16px;min-width:0}",
-      ".dshRunnerLogTitle{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 120px}",
-      ".dshRunnerLogMeta{font-size:10px;opacity:.55;white-space:nowrap;flex:none}",
-      ".dshRunnerLogNote{font-size:10px;line-height:14px;color:#f59e0b;flex:1 1 100%;min-width:0;white-space:normal;word-break:break-word}",
-      ".dshRunnerPre{flex:1;min-height:140px;margin:0;padding:8px 10px;overflow:auto;font-family:ui-monospace,Consolas,'Courier New',monospace;font-size:11px;line-height:16px;white-space:pre-wrap;word-break:break-all;user-select:text;background:rgba(0,0,0,.18);color:inherit}",
-      ".dshRunnerError{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;border:.5px solid rgba(239,68,68,.45);background:rgba(239,68,68,.08);color:#f87171;border-radius:8px;padding:7px 9px;font-size:11px;line-height:16px;flex:none}",
-      ".dshRunnerErrorText{flex:1 1 220px;min-width:0;word-break:break-word}",
-      ".dshRunnerErrorDetail{flex:0 0 100%;opacity:.85;font-family:ui-monospace,Consolas,'Courier New',monospace;font-size:10px;line-height:15px;word-break:break-word}",
-      // ---- 端口冲突对话框 ----
-      ".dshRunnerDialogBackdrop{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45);padding:24px}",
-      ".dshRunnerDialog{width:min(740px,100%);max-height:min(80vh,760px);overflow:auto;display:flex;flex-direction:column;gap:9px;padding:14px 16px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.4));background:var(--dsw-alias-bg-layer-1,#1f1f22);box-shadow:0 18px 48px rgba(0,0,0,.45)}",
-      ".dshRunnerDialogHead{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600}",
-      ".dshRunnerDialogSub{font-size:11px;line-height:17px;opacity:.75}",
-      ".dshRunnerConflictEntry{display:flex;flex-direction:column;gap:3px;padding:9px 10px;border-radius:9px;border:.5px solid rgba(245,158,11,.38);background:rgba(245,158,11,.07);font-size:11px;line-height:16px}",
-      ".dshRunnerConflictHead{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-weight:600}",
-      ".dshRunnerConflictPort{font-family:ui-monospace,Consolas,'Courier New',monospace;color:#f59e0b}",
-      ".dshRunnerConflictMeta{opacity:.8;word-break:break-word}",
-      ".dshRunnerConflictCode{font-family:ui-monospace,Consolas,'Courier New',monospace;font-size:10px;line-height:15px;opacity:.72;word-break:break-all;max-height:52px;overflow:auto;user-select:text}",
-      ".dshRunnerConflictTag{flex:none;padding:0 6px;border-radius:999px;font-size:9px;line-height:15px;border:.5px solid rgba(245,158,11,.6);color:#f59e0b}",
-      ".dshRunnerDialogActions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:2px}",
-      ".dshRunnerDialogError{font-size:11px;line-height:16px;color:#f87171;background:rgba(239,68,68,.08);border-radius:8px;padding:6px 9px;word-break:break-word}",
-      ".dshRunnerDialogBusy{font-size:11px;opacity:.75}",
-      // ---- 插件详情页更新区 ----
-      ".dshLimobUpdateBadge{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;border:.5px solid rgba(245,158,11,.5);background:rgba(245,158,11,.12);color:#f59e0b;font-size:11px;line-height:18px;white-space:nowrap}",
-      ".dshLimobDetailSection{display:flex;flex-direction:column;gap:8px;padding:14px 16px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));border-radius:10px;background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.06));font-size:12px;line-height:18px}",
-      ".dshLimobDetailTitle{font-size:13px;font-weight:600}",
-      ".dshLimobDetailMuted{opacity:.65}",
-      ".dshLimobDetailCode{display:block;padding:8px 10px;border-radius:7px;background:rgba(0,0,0,.22);font-family:ui-monospace,Consolas,'Courier New',monospace;font-size:11px;line-height:16px;word-break:break-all;user-select:text}",
-      ".dshLimobDetailActions{display:flex;flex-wrap:wrap;gap:8px}",
-      ".dshLimobDetailBtn{display:inline-flex;align-items:center;height:26px;padding:0 10px;border-radius:7px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));background:transparent;color:inherit;font:inherit;font-size:12px;text-decoration:none;cursor:pointer}",
-      ".dshLimobDetailBtn:hover{background:rgba(103,158,254,.14)}",
-      ".dshLimobDetailBtn[disabled]{opacity:.55;cursor:default}"
-    ].join("");
+/* ---- 1. 通用交互底座 ---- */
+.dshRunnerPage,
+.dshRunnerDialog,
+.dshLimobCfgPage,
+.dshLimobRunDock,
+.dshLimobDetailSection {
+  font-family: inherit;
+  -webkit-font-smoothing: antialiased;
+  color: var(--drr-text);
+}
+.dshRunnerPage *,
+.dshRunnerDialog *,
+.dshLimobCfgPage *,
+.dshLimobCfgModal *,
+.dshLimobRunDock *,
+.dshLimobRunMenu *,
+.dshRunnerHeaderFloat *,
+.dshRunnerLogBubble *,
+.dshLimobDetailSection * { box-sizing: border-box; }
+
+.dshRunnerPage ::selection,
+.dshRunnerDialog ::selection,
+.dshLimobCfgPage ::selection,
+.dshLimobCfgModal ::selection,
+.dshLimobRunMenu ::selection,
+.dshRunnerLogBubble ::selection,
+.dshLimobDetailSection ::selection {
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 22%, transparent);
+}
+
+/* 细滚动条，深浅主题都跟随文字色 */
+.dshRunnerList,
+.dshRunnerPre,
+.dshLimobRunMenu,
+.dshLimobCfgModal,
+.dshRunnerDialog,
+.dshRunnerLogBubbleBody,
+.dshLimobTextarea,
+.dshRunnerHeaderFloat { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--drr-text) 20%, transparent) transparent; }
+.dshRunnerList::-webkit-scrollbar,
+.dshRunnerPre::-webkit-scrollbar,
+.dshLimobRunMenu::-webkit-scrollbar,
+.dshLimobCfgModal::-webkit-scrollbar,
+.dshRunnerDialog::-webkit-scrollbar,
+.dshRunnerLogBubbleBody::-webkit-scrollbar { width: 10px; height: 10px; }
+.dshRunnerList::-webkit-scrollbar-thumb,
+.dshRunnerPre::-webkit-scrollbar-thumb,
+.dshLimobRunMenu::-webkit-scrollbar-thumb,
+.dshLimobCfgModal::-webkit-scrollbar-thumb,
+.dshRunnerDialog::-webkit-scrollbar-thumb,
+.dshRunnerLogBubbleBody::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--drr-text) 18%, transparent);
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+}
+.dshRunnerList::-webkit-scrollbar-thumb:hover,
+.dshRunnerPre::-webkit-scrollbar-thumb:hover,
+.dshLimobRunMenu::-webkit-scrollbar-thumb:hover,
+.dshLimobCfgModal::-webkit-scrollbar-thumb:hover,
+.dshRunnerDialog::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--drr-text) 30%, transparent); background-clip: content-box; }
+.dshRunnerList::-webkit-scrollbar-track,
+.dshRunnerPre::-webkit-scrollbar-track,
+.dshLimobRunMenu::-webkit-scrollbar-track,
+.dshLimobCfgModal::-webkit-scrollbar-track,
+.dshRunnerDialog::-webkit-scrollbar-track { background: transparent; }
+
+.dshRunnerPage button:focus-visible,
+.dshRunnerDialog button:focus-visible,
+.dshLimobCfgPage button:focus-visible,
+.dshLimobCfgModal button:focus-visible,
+.dshLimobRunDock button:focus-visible,
+.dshLimobRunMenu button:focus-visible,
+.dshRunnerHeaderFloat button:focus-visible,
+.dshRunnerLogBubble button:focus-visible,
+.dshLimobDetailSection a:focus-visible,
+.dshRunnerDialog [tabindex]:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--drr-brand) 55%, transparent);
+  outline-offset: 2px;
+}
+
+@keyframes drr-pop { from { opacity: 0; transform: translateY(4px) scale(.985); } to { opacity: 1; transform: none; } }
+@keyframes drr-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes drr-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@keyframes drr-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+/* ---- 2. 按钮 ---- */
+.dshLimobCfgBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border: 1px solid var(--drr-line-2);
+  border-radius: var(--drr-r-sm);
+  background: transparent;
+  color: var(--drr-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color .14s var(--drr-ease), border-color .14s var(--drr-ease), color .14s var(--drr-ease), opacity .14s var(--drr-ease);
+}
+.dshLimobCfgBtn > svg { width: 14px; height: 14px; flex: none; }
+.dshLimobCfgBtn:hover:not([disabled]) { background: var(--drr-fill-1); }
+.dshLimobCfgBtn:active:not([disabled]) { background: var(--drr-fill-2); }
+.dshLimobCfgBtn[disabled] { opacity: .42; cursor: default; }
+.dshLimobCfgBtnPrimary {
+  border-color: transparent;
+  background: var(--drr-brand);
+  color: var(--drr-on-brand);
+  font-weight: 600;
+}
+.dshLimobCfgBtnPrimary:hover:not([disabled]) { background: color-mix(in srgb, var(--drr-brand) 88%, transparent); }
+.dshLimobCfgBtnPrimary:active:not([disabled]) { background: color-mix(in srgb, var(--drr-brand) 78%, transparent); }
+.dshLimobCfgBtnDanger { border-color: color-mix(in srgb, var(--drr-error) 38%, transparent); color: var(--drr-error-ink); }
+.dshLimobCfgBtnDanger:hover:not([disabled]) { background: color-mix(in srgb, var(--drr-error) 12%, transparent); }
+.dshLimobCfgBtnDangerSolid { border-color: transparent; background: color-mix(in srgb, var(--drr-error) 80%, #000); color: #fff; font-weight: 600; }
+.dshLimobCfgBtnDangerSolid:hover:not([disabled]) { background: color-mix(in srgb, var(--drr-error) 68%, #000); }
+.dshLimobCfgBtnGhost { height: 26px; padding: 0 8px; border-color: transparent; color: var(--drr-text-2); }
+.dshLimobCfgBtnGhost:hover:not([disabled]) { color: var(--drr-text); background: var(--drr-fill-1); }
+
+.dshLimobIconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--drr-text-2);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color .14s var(--drr-ease), color .14s var(--drr-ease), opacity .14s var(--drr-ease);
+}
+.dshLimobIconBtn > svg { width: 15px; height: 15px; }
+.dshLimobIconBtn:hover:not([disabled]) { background: var(--drr-fill-1); color: var(--drr-text); }
+.dshLimobIconBtn:active:not([disabled]) { background: var(--drr-fill-2); }
+.dshLimobIconBtn[disabled] { opacity: .28; cursor: default; }
+.dshLimobIconBtn[data-danger="true"]:hover:not([disabled]) { background: color-mix(in srgb, var(--drr-error) 14%, transparent); color: var(--drr-error-ink); }
+
+.dshRunnerMiniBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--drr-line-2);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--drr-text-2);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color .14s var(--drr-ease), color .14s var(--drr-ease), border-color .14s var(--drr-ease), opacity .14s var(--drr-ease);
+}
+.dshRunnerMiniBtn > svg { width: 13px; height: 13px; flex: none; }
+.dshRunnerMiniBtn:hover:not([disabled]) { background: var(--drr-fill-1); color: var(--drr-text); }
+.dshRunnerMiniBtn[disabled] { opacity: .35; cursor: default; }
+.dshRunnerMiniBtn[data-action="stop"]:hover:not([disabled]) { color: var(--drr-error-ink); background: color-mix(in srgb, var(--drr-error) 12%, transparent); border-color: color-mix(in srgb, var(--drr-error) 30%, transparent); }
+.dshRunnerMiniBtn[data-action="adopt"]:hover:not([disabled]) { color: var(--drr-warn-ink); background: color-mix(in srgb, var(--drr-warn) 12%, transparent); border-color: color-mix(in srgb, var(--drr-warn) 32%, transparent); }
+
+/* ---- 3. 标签 / 开关 / 表单控件 ---- */
+.dshLimobTag {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 17px;
+  padding: 0 6px;
+  border: 1px solid var(--drr-line-2);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--drr-text-2);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  max-width: 16em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dshLimobTag[data-scope="project"] { background: var(--drr-fill-1); color: var(--drr-text-2); }
+.dshLimobTag[data-current="true"] { border-color: transparent; background: var(--drr-fill-2); color: var(--drr-text); font-weight: 600; }
+
+.dshLimobSwitch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--drr-text-2);
+  user-select: none;
+  cursor: pointer;
+  position: relative;
+  white-space: nowrap;
+}
+.dshLimobSwitch input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.dshLimobSwitchTrack {
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--drr-fill-3);
+  position: relative;
+  flex: none;
+  transition: background-color .16s var(--drr-ease);
+}
+.dshLimobSwitchTrack::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--drr-surface);
+  box-shadow: var(--drr-shadow-sm);
+  transition: transform .16s var(--drr-ease);
+}
+.dshLimobSwitch input:checked + .dshLimobSwitchTrack { background: var(--drr-brand); }
+.dshLimobSwitch input:checked + .dshLimobSwitchTrack::after { transform: translateX(16px); background: var(--drr-on-brand); }
+.dshLimobSwitch input:focus-visible + .dshLimobSwitchTrack { outline: 2px solid color-mix(in srgb, var(--drr-brand) 55%, transparent); outline-offset: 2px; }
+.dshLimobSwitch:hover .dshLimobSwitchTrack { background: var(--drr-fill-3); }
+.dshLimobSwitch:hover input:checked + .dshLimobSwitchTrack { background: color-mix(in srgb, var(--drr-brand) 88%, transparent); }
+
+.dshLimobInput,
+.dshLimobTextarea,
+.dshLimobSelect {
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  border: 1px solid var(--drr-line-2);
+  border-radius: var(--drr-r-sm);
+  background: color-mix(in srgb, var(--drr-text) 3%, var(--drr-surface));
+  color: var(--drr-text);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  padding: 5px 9px;
+  transition: border-color .14s var(--drr-ease), box-shadow .14s var(--drr-ease), background-color .14s var(--drr-ease);
+}
+.dshLimobInput { height: 30px; }
+.dshLimobTextarea {
+  min-height: 66px;
+  resize: vertical;
+  font-family: var(--drr-mono);
+  font-size: 11.5px;
+  line-height: 17px;
+  padding: 7px 9px;
+}
+.dshLimobInput::placeholder,
+.dshLimobTextarea::placeholder { color: var(--drr-text-3); }
+.dshLimobInput:hover,
+.dshLimobTextarea:hover,
+.dshLimobSelect:hover { border-color: var(--drr-line-3); }
+.dshLimobInput:focus,
+.dshLimobTextarea:focus,
+.dshLimobSelect:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--drr-brand) 55%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--drr-brand) 10%, transparent);
+}
+.dshLimobSelect { height: 30px; padding-right: 6px; }
+.dshLimobCfgModal input[type="checkbox"],
+.dshLimobCfgPage input[type="checkbox"] { accent-color: var(--drr-brand); }
+
+.dshLimobSegment {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 0;
+  border-radius: var(--drr-r-sm);
+  background: var(--drr-fill-1);
+  flex: none;
+}
+.dshLimobSegment button {
+  border: 0;
+  background: transparent;
+  color: var(--drr-text-2);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1;
+  height: 24px;
+  padding: 0 11px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color .14s var(--drr-ease), color .14s var(--drr-ease);
+}
+.dshLimobSegment button:hover { color: var(--drr-text); }
+.dshLimobSegment button[data-active="true"] { background: var(--drr-fill-3); color: var(--drr-text); font-weight: 600; }
+
+.dshLimobLinkBtn {
+  border: 0;
+  background: transparent;
+  color: var(--drr-brand);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--drr-brand) 35%, transparent);
+}
+.dshLimobLinkBtn:hover { text-decoration-color: currentColor; }
+
+/* ---- 4. 输入框下方的「运行」按钮与快捷菜单 ---- */
+.dshLimobRunDock { position: relative; display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+.dshLimobRunBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px 0 8px;
+  border: 0;
+  border-radius: var(--drr-r-sm);
+  background: transparent;
+  color: var(--drr-text-2);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  transition: background-color .14s var(--drr-ease), color .14s var(--drr-ease);
+}
+.dshLimobRunBtn > svg { width: 13px; height: 13px; flex: none; }
+.dshLimobRunBtn:hover { background: var(--drr-fill-1); color: var(--drr-text); }
+.dshLimobRunBtn:active { background: var(--drr-fill-2); }
+.dshLimobRunBtn[data-busy="true"] { cursor: progress; color: var(--drr-text-3); }
+.dshLimobRunStatus {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--drr-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dshLimobRunStatus[data-phase="error"] { color: var(--drr-error-ink); }
+
+.dshLimobRunMenu {
+  position: fixed;
+  z-index: 1000;
+  box-sizing: border-box;
+  min-width: 300px;
+  max-width: min(420px, 92vw);
+  max-height: min(58vh, 520px);
+  overflow: auto;
+  padding: 7px;
+  border: 0;
+  border-radius: var(--drr-r-md);
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--drr-shadow-pop);
+  color: var(--drr-text);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  animation: drr-pop .16s var(--drr-ease);
+}
+.dshLimobRunMenuTitle {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px 7px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--drr-text);
+  user-select: none;
+  min-width: 0;
+}
+.dshLimobRunMenuTitle > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshLimobRunMenuTitle > span:last-child { font-weight: 400; font-size: 10.5px; color: var(--drr-text-3); font-family: var(--drr-mono); }
+.dshLimobRunRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 8px;
+  border-radius: var(--drr-r-sm);
+  min-width: 0;
+  transition: background-color .12s var(--drr-ease);
+}
+.dshLimobRunRow:hover { background: var(--drr-fill-1); }
+.dshLimobRunRowMain { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.dshLimobRunItemTitleLine { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.dshLimobRunItemTitleLine .dshRunnerDot { margin-top: 0; width: 6px; height: 6px; align-self: center; }
+.dshLimobRunItemTitle { font-size: 12.5px; font-weight: 500; line-height: 17px; color: var(--drr-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.dshLimobRunItemState { font-family: inherit; color: var(--drr-text-3); }
+.dshLimobRunItemState[data-status="running"] { color: var(--drr-ok-ink); }
+.dshLimobRunItemState[data-status="starting"], .dshLimobRunItemState[data-status="stopping"], .dshLimobRunItemState[data-status="external"] { color: var(--drr-warn-ink); }
+.dshLimobRunItemState[data-status="failed"], .dshLimobRunItemState[data-status="exited"] { color: var(--drr-error-ink); }
+.dshLimobRunItemCmd { font-size: 11px; line-height: 14px; color: var(--drr-text-3); font-family: var(--drr-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dshLimobRunRowActions { display: flex; align-items: center; gap: 1px; flex: none; }
+.dshLimobRunRowActions .dshLimobIconBtn { width: 24px; height: 24px; border-radius: 6px; }
+.dshLimobRunSep { height: 1px; margin: 6px 4px; background: var(--drr-line); }
+.dshLimobRunHint { padding: 6px 8px 4px; font-size: 10.5px; line-height: 15px; color: var(--drr-text-3); user-select: none; }
+.dshLimobRunEmpty { display: flex; flex-direction: column; gap: 6px; padding: 12px 10px; font-size: 11.5px; line-height: 17px; color: var(--drr-text-3); }
+
+/* ---- 5. 设置页 / 配置编辑器 ---- */
+.dshLimobCfgPage {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 940px;
+  padding: 18px 20px 28px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--drr-text);
+}
+.dshLimobPageHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 0 0 14px; border-bottom: 1px solid var(--drr-line); }
+.dshLimobPageTitle { font-size: 15px; font-weight: 600; line-height: 21px; letter-spacing: -.01em; }
+.dshLimobPageSub { margin-top: 3px; font-size: 11.5px; line-height: 16px; color: var(--drr-text-3); }
+.dshLimobPageVersion { flex: none; padding-top: 3px; font-size: 10.5px; line-height: 16px; color: var(--drr-text-3); font-family: var(--drr-mono); }
+.dshLimobCfg { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.dshLimobCfgToolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.dshLimobCfgStat { flex: 1 1 200px; min-width: 0; font-size: 11.5px; line-height: 16px; color: var(--drr-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.dshLimobCmdList {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--drr-line);
+  border-radius: var(--drr-r-md);
+  overflow: hidden;
+  background: var(--drr-surface);
+}
+.dshLimobCmdRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 10px 10px 14px;
+  border-bottom: 1px solid var(--drr-line);
+  min-width: 0;
+  transition: background-color .12s var(--drr-ease);
+}
+.dshLimobCmdRow:last-child { border-bottom: 0; }
+.dshLimobCmdRow:hover { background: var(--drr-fill-1); }
+.dshLimobCmdRow[data-disabled="true"] { opacity: .5; }
+.dshLimobCmdMain { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; cursor: pointer; }
+.dshLimobCmdTitleLine { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.dshLimobCmdTitle { font-size: 13px; font-weight: 500; line-height: 17px; color: var(--drr-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dshLimobCmdPreview { font-size: 11px; line-height: 14px; color: var(--drr-text-3); font-family: var(--drr-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dshLimobCmdActions { display: flex; align-items: center; gap: 2px; flex: none; }
+.dshLimobCmdActions .dshLimobIconBtn { width: 25px; height: 25px; }
+.dshLimobCfgEmpty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 30px 14px; text-align: center; font-size: 11.5px; line-height: 17px; color: var(--drr-text-3); }
+.dshLimobCfgForm {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 16px;
+  border: 1px solid var(--drr-line-2);
+  border-radius: var(--drr-r-md);
+  background: var(--drr-raised);
+  animation: drr-pop .16s var(--drr-ease);
+}
+.dshLimobCfgFormTop { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.dshLimobCfgFormTitle { font-size: 13px; font-weight: 600; line-height: 18px; letter-spacing: -.005em; }
+.dshLimobFormGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px 14px; }
+.dshLimobFormField { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.dshLimobFormField[data-wide="true"] { grid-column: 1 / -1; }
+.dshLimobFormField > span { font-size: 11px; line-height: 14px; font-weight: 500; color: var(--drr-text-2); }
+.dshLimobFormRow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.dshLimobFormRow .dshLimobSelect { flex: 1 1 200px; }
+.dshLimobFormFoot { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; gap: 8px; justify-content: flex-end; min-height: 40px; margin: 0 -16px -16px; padding: 8px 16px 10px; border-top: 1px solid var(--drr-line); border-radius: 0 0 var(--drr-r-md) var(--drr-r-md); background: var(--drr-raised); }
+.dshLimobFormError { margin-right: auto; color: var(--drr-error-ink); font-size: 11.5px; line-height: 16px; word-break: break-word; }
+.dshLimobCfgError { color: var(--drr-error-ink); font-size: 11.5px; line-height: 16px; word-break: break-word; }
+.dshLimobCfgNotice { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; padding: 5px 10px; border-radius: 999px; color: var(--drr-ok-ink); background: color-mix(in srgb, var(--drr-ok) 12%, transparent); font-size: 11.5px; line-height: 16px; animation: drr-fade .16s var(--drr-ease); }
+.dshLimobFieldHint { font-size: 10.5px; line-height: 15px; color: var(--drr-text-3); }
+.dshLimobDepList { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 2px; }
+.dshLimobDepItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  height: 26px;
+  padding: 0 9px 0 6px;
+  border: 1px solid var(--drr-line-2);
+  border-radius: 999px;
+  font-size: 11.5px;
+  line-height: 1;
+  color: var(--drr-text-2);
+  cursor: pointer;
+  transition: background-color .12s var(--drr-ease), border-color .12s var(--drr-ease), color .12s var(--drr-ease);
+}
+.dshLimobDepItem:hover { background: var(--drr-fill-1); color: var(--drr-text); }
+.dshLimobDepItem:has(input:checked) { border-color: color-mix(in srgb, var(--drr-brand) 40%, transparent); background: color-mix(in srgb, var(--drr-brand) 10%, transparent); color: var(--drr-text); }
+.dshLimobDepItem input { margin: 0; }
+.dshLimobDepItem span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 命令配置弹窗 */
+.dshLimobCfgModalBackdrop {
+  pointer-events: auto;
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, #000 44%, transparent);
+  animation: drr-fade .14s var(--drr-ease);
+}
+.dshLimobCfgModal {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: min(800px, 94vw);
+  max-height: min(88vh, 860px);
+  overflow: auto;
+  border: 0;
+  border-radius: var(--drr-r-lg);
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--drr-shadow-pop);
+  animation: drr-pop .18s var(--drr-ease);
+}
+.dshLimobCfgModalHead {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 14px 13px 20px;
+  border-bottom: 1px solid var(--drr-line);
+  background: var(--dsw-alias-bg-layer-1);
+}
+.dshLimobCfgModalTitle { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.dshLimobCfgModalTitle > span:first-child { font-size: 13.5px; font-weight: 600; line-height: 19px; }
+.dshLimobCfgModalTitle > span:last-child { font-size: 10.5px; line-height: 14px; color: var(--drr-text-3); }
+.dshLimobCfgModalBody { padding: 16px 20px 20px; }
+
+/* ---- 6. 运行面板 ---- */
+.dshRunnerPage {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 16px 18px 12px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--drr-text);
+}
+.dshRunnerHead { display: flex; align-items: flex-start; gap: 16px; flex: none; padding: 0 2px 13px; min-width: 0; }
+.dshRunnerHeadMain { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.dshRunnerTitle { font-size: 17px; font-weight: 600; line-height: 22px; letter-spacing: -.012em; color: var(--drr-text); }
+.dshRunnerSub { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; min-width: 0; font-size: 11.5px; line-height: 16px; color: var(--drr-text-3); }
+.dshRunnerProject { font-size: 11.5px; font-weight: 500; color: var(--drr-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 32ch; }
+.dshRunnerSepDot { width: 2px; height: 2px; border-radius: 50%; background: currentColor; opacity: .55; flex: none; }
+.dshRunnerSummary { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.dshRunnerSummaryDot { width: 6px; height: 6px; border-radius: 50%; background: var(--drr-idle); flex: none; }
+.dshRunnerSummary[data-tone="running"] .dshRunnerSummaryDot { background: var(--drr-ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--drr-ok) 16%, transparent); }
+.dshRunnerSummary[data-tone="failed"] .dshRunnerSummaryDot { background: var(--drr-error); }
+.dshRunnerSummary[data-tone="external"] .dshRunnerSummaryDot { background: var(--drr-warn); }
+.dshRunnerToolbar { display: flex; align-items: center; gap: 8px; flex: none; }
+.dshRunnerBody { display: grid; grid-template-columns: minmax(300px, 43%) minmax(0, 1fr); gap: 16px; flex: 1; min-height: 0; }
+@media (max-width: 900px) {
+  .dshRunnerBody { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1.35fr) minmax(0, 1fr); }
+  .dshRunnerList { padding-right: 2px; }
+}
+
+.dshRunnerList { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; padding: 0 6px 20px 2px; }
+.dshRunnerSection { display: flex; flex-direction: column; gap: 1px; flex: none; min-width: 0; padding-top: 2px; }
+.dshRunnerSection + .dshRunnerSection { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--drr-line); }
+.dshRunnerSectionHead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 6px 7px 2px;
+  min-width: 0;
+  background: var(--drr-surface);
+}
+.dshRunnerSectionToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--drr-r-xs);
+  background: transparent;
+  color: var(--drr-text-3);
+  cursor: pointer;
+  transition: background-color .12s var(--drr-ease), color .12s var(--drr-ease);
+}
+.dshRunnerSectionToggle > svg { width: 14px; height: 14px; transition: transform .16s var(--drr-ease); }
+.dshRunnerSectionToggle[aria-expanded="false"] > svg { transform: rotate(-90deg); }
+.dshRunnerSectionToggle:hover { background: var(--drr-fill-1); color: var(--drr-text); }
+.dshRunnerColorSwatch {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  background: var(--drr-swatch, var(--drr-idle));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--drr-swatch, var(--drr-idle)) 18%, transparent);
+  transition: box-shadow .14s var(--drr-ease), transform .14s var(--drr-ease);
+}
+.dshRunnerColorSwatch:hover { transform: scale(1.1); box-shadow: 0 0 0 4px color-mix(in srgb, var(--drr-swatch, var(--drr-idle)) 26%, transparent); }
+.dshRunnerColorRow { display: flex; align-items: center; gap: 5px; padding: 4px 8px 8px; flex-wrap: wrap; }
+.dshRunnerColorLabel { margin-right: 3px; font-size: 10.5px; line-height: 1; color: var(--drr-text-3); }
+.dshRunnerColorChip { width: 16px; height: 16px; padding: 0; border: 0; border-radius: 50%; cursor: pointer; opacity: .9; transition: transform .14s var(--drr-ease), box-shadow .14s var(--drr-ease); }
+.dshRunnerColorChip:hover { transform: scale(1.12); box-shadow: 0 0 0 2px var(--drr-surface), 0 0 0 3.5px currentColor; }
+.dshRunnerColorAuto {
+  height: 20px;
+  margin-left: 2px;
+  padding: 0 8px;
+  border: 1px solid var(--drr-line-2);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--drr-text-2);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  cursor: pointer;
+}
+.dshRunnerColorAuto:hover { background: var(--drr-fill-1); color: var(--drr-text); }
+.dshRunnerSectionInfo { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+.dshRunnerSectionTitleLine { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.dshRunnerSectionTitle { font-size: 13px; font-weight: 600; line-height: 17px; color: var(--drr-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dshRunnerSectionPath { font-size: 11px; line-height: 14px; color: var(--drr-text-3); font-family: var(--drr-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dshRunnerSectionCount {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--drr-fill-1);
+  color: var(--drr-text-2);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dshRunnerSectionCount[data-tone="active"] { background: color-mix(in srgb, var(--drr-ok) 14%, transparent); color: var(--drr-ok-ink); }
+.dshRunnerSectionIssue {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--drr-warn) 12%, transparent);
+  color: var(--drr-warn-ink);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.dshRunnerSectionActions { display: flex; align-items: center; gap: 6px; flex: none; }
+.dshRunnerSectionActions .dshLimobIconBtn { width: 26px; height: 26px; border-radius: 7px; color: var(--drr-text-2); }
+.dshRunnerSectionActions .dshLimobIconBtn:hover:not([disabled]) { background: var(--drr-fill-1); color: var(--drr-text); }
+.dshRunnerSectionEmpty { padding: 10px 6px 12px; font-size: 11px; line-height: 16px; color: var(--drr-text-3); }
+
+.dshRunnerRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 8px 9px 11px;
+  border-bottom: 1px solid var(--drr-line);
+  border-radius: 0;
+  min-width: 0;
+  cursor: pointer;
+  transition: background-color .12s var(--drr-ease), box-shadow .12s var(--drr-ease);
+}
+.dshRunnerRow:last-child { border-bottom-color: transparent; }
+.dshRunnerRow:hover { background: var(--drr-fill-1); }
+.dshRunnerRow[data-selected="true"] { background: var(--drr-fill-2); border-radius: var(--drr-r-sm); box-shadow: inset 0 0 0 1px var(--drr-line-2); }
+.dshRunnerRow[data-disabled="true"] { opacity: .5; }
+.dshRunnerDot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--drr-idle);
+  transition: background-color .16s var(--drr-ease), box-shadow .16s var(--drr-ease);
+}
+.dshRunnerDot[data-status="queued"] { background: var(--drr-text-3); box-shadow: none; }
+.dshRunnerDot[data-status="starting"],
+.dshRunnerDot[data-status="stopping"] { background: var(--drr-warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--drr-warn) 18%, transparent); animation: drr-pulse 1.6s ease-in-out infinite; }
+.dshRunnerDot[data-status="external"] { background: var(--drr-warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--drr-warn) 18%, transparent); }
+.dshRunnerDot[data-status="running"] { background: var(--drr-ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--drr-ok) 18%, transparent); }
+.dshRunnerDot[data-status="failed"],
+.dshRunnerDot[data-status="exited"] { background: var(--drr-error); box-shadow: 0 0 0 3px color-mix(in srgb, var(--drr-error) 16%, transparent); }
+.dshRunnerRowMain { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.dshRunnerRowTitle { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.dshRunnerRowTitleText { font-size: 13px; font-weight: 500; line-height: 17px; color: var(--drr-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.dshRunnerState {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--drr-fill-1);
+  color: var(--drr-text-2);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.dshRunnerState[data-status="running"] { background: color-mix(in srgb, var(--drr-ok) 13%, transparent); color: var(--drr-ok-ink); }
+.dshRunnerState[data-status="queued"] { color: var(--drr-text-2); }
+.dshRunnerState[data-status="starting"],
+.dshRunnerState[data-status="stopping"] { background: color-mix(in srgb, var(--drr-warn) 13%, transparent); color: var(--drr-warn-ink); }
+.dshRunnerState[data-status="external"] { background: color-mix(in srgb, var(--drr-warn) 13%, transparent); color: var(--drr-warn-ink); }
+.dshRunnerState[data-status="failed"],
+.dshRunnerState[data-status="exited"] { background: color-mix(in srgb, var(--drr-error) 12%, transparent); color: var(--drr-error-ink); }
+.dshRunnerRowMetaLine { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.dshRunnerRowCmd { flex: 1 1 auto; min-width: 0; font-family: var(--drr-mono); font-size: 11px; line-height: 15px; color: var(--drr-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dshRunnerRowMeta { display: flex; align-items: center; gap: 6px; flex: none; min-width: 0; font-size: 11px; line-height: 14px; font-variant-numeric: tabular-nums; }
+.dshRunnerStatusText { color: var(--drr-text-3); white-space: nowrap; }
+.dshRunnerStatusText[data-status="external"] { color: var(--drr-warn-ink); }
+.dshRunnerPort {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 16px;
+  padding: 0 5px;
+  border: 1px solid var(--drr-line-2);
+  border-radius: 5px;
+  color: var(--drr-text-2);
+  font-family: var(--drr-mono);
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.dshRunnerPortWarn { border-color: color-mix(in srgb, var(--drr-warn) 42%, transparent); background: color-mix(in srgb, var(--drr-warn) 10%, transparent); color: var(--drr-warn-ink); }
+.dshRunnerRowActions { display: flex; align-items: center; gap: 6px; flex: none; align-self: center; }
+.dshRunnerRowActions .dshLimobIconBtn { width: 24px; height: 24px; border-radius: 7px; }
+.dshRunnerTagExternal {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 17px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--drr-warn) 38%, transparent);
+  background: color-mix(in srgb, var(--drr-warn) 10%, transparent);
+  color: var(--drr-warn-ink);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  max-width: 16em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dshRunnerEmpty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; padding: 44px 18px; text-align: center; color: var(--drr-text-3); }
+.dshRunnerEmptyIcon { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: 12px; background: var(--drr-fill-1); color: var(--drr-text-3); }
+.dshRunnerEmptyIcon > svg { width: 19px; height: 19px; }
+.dshRunnerEmptyTitle { font-size: 12.5px; font-weight: 500; line-height: 18px; color: var(--drr-text-2); }
+.dshRunnerEmptyHint { font-size: 11.5px; line-height: 17px; color: var(--drr-text-3); max-width: 34ch; }
+.dshRunnerLoading { display: flex; flex-direction: column; gap: 8px; padding: 32px 18px; }
+.dshRunnerLoadingLine { height: 10px; border-radius: 999px; background: linear-gradient(90deg, var(--drr-fill-1) 25%, var(--drr-fill-2) 50%, var(--drr-fill-1) 75%); background-size: 200% 100%; animation: drr-shimmer 1.4s linear infinite; }
+
+/* ---- 7. 日志面板 ---- */
+.dshRunnerLogPane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--drr-line);
+  border-radius: var(--drr-r-md);
+  background: var(--drr-raised);
+  overflow: hidden;
+}
+.dshRunnerLogHead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 9px 8px 9px 12px; border-bottom: 1px solid var(--drr-line); min-width: 0; flex: none; }
+.dshRunnerLogTitle { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 0 1 auto; font-size: 13px; font-weight: 600; line-height: 17px; color: var(--drr-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dshRunnerLogTitle .dshRunnerDot { margin-top: 0; align-self: center; }
+.dshRunnerLogTitle > span:not(.dshRunnerDot) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshRunnerLogMeta { flex: none; font-size: 11px; line-height: 14px; color: var(--drr-text-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.dshRunnerLogMeta[data-path="true"] { flex: 0 1 auto; min-width: 0; max-width: 42%; font-family: var(--drr-mono); overflow: hidden; text-overflow: ellipsis; }
+.dshRunnerLogTools { display: flex; align-items: center; gap: 1px; flex: none; margin-left: auto; }
+.dshRunnerLogTools .dshLimobIconBtn { width: 25px; height: 25px; border-radius: 6px; }
+.dshRunnerLogNote { display: flex; align-items: flex-start; gap: 7px; flex: 1 1 100%; min-width: 0; padding: 7px 9px; border-radius: var(--drr-r-xs); background: color-mix(in srgb, var(--drr-warn) 10%, transparent); color: var(--drr-warn-ink); font-size: 10.5px; line-height: 15px; white-space: normal; word-break: break-word; }
+.dshRunnerLogNote > svg { flex: none; width: 13px; height: 13px; margin-top: 1px; }
+.dshRunnerPre {
+  flex: 1;
+  min-height: 140px;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  font-family: var(--drr-mono);
+  font-size: 11.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--drr-text-2);
+  background: color-mix(in srgb, var(--drr-text) 4%, transparent);
+  user-select: text;
+  tab-size: 2;
+}
+.dshRunnerLogEmpty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; flex: 1; min-height: 140px; padding: 24px 18px; text-align: center; background: color-mix(in srgb, var(--drr-text) 4%, transparent); color: var(--drr-text-3); }
+
+/* ---- 8. 顶部 chip + 悬停日志气泡 ---- */
+.dshRunnerHeaderFloat {
+  position: fixed;
+  transform: translate(-50%, -50%);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  overflow: hidden;
+  pointer-events: none;
+  -webkit-app-region: no-drag;
+}
+.dshRunnerHeaderChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 999px;
+  background: light-dark(color-mix(in srgb, var(--drr-chip, var(--drr-text)) 8%, transparent), color-mix(in srgb, var(--drr-chip, var(--drr-text)) 14%, transparent));
+  box-shadow: inset 0 0 0 1px var(--drr-line-2);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+  transition: background-color .14s var(--drr-ease);
+}
+.dshRunnerHeaderChip:hover { background: light-dark(color-mix(in srgb, var(--drr-chip, var(--drr-text)) 12%, transparent), color-mix(in srgb, var(--drr-chip, var(--drr-text)) 22%, transparent)); }
+.dshRunnerHeaderChip .dshRunnerDot { margin-top: 0; align-self: center; width: 6px; height: 6px; box-shadow: 0 0 0 2px color-mix(in srgb, var(--drr-chip, var(--drr-text)) 18%, transparent); }
+.dshRunnerHeaderName { min-width: 0; font-weight: 500; color: var(--drr-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshRunnerHeaderState { flex: none; white-space: nowrap; color: var(--drr-text-2); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.dshRunnerHeaderState[data-status="running"] { color: var(--drr-ok-ink); }
+.dshRunnerHeaderState[data-status="queued"] { color: var(--drr-text-3); }
+.dshRunnerHeaderState[data-status="starting"],
+.dshRunnerHeaderState[data-status="stopping"] { color: var(--drr-warn-ink); }
+.dshRunnerHeaderState[data-status="failed"],
+.dshRunnerHeaderState[data-status="exited"] { color: var(--drr-error-ink); }
+.dshRunnerHeaderActions { display: inline-flex; align-items: center; gap: 1px; flex: none; margin-left: 1px; -webkit-app-region: no-drag; }
+.dshRunnerHeaderBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--drr-text-2);
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: background-color .12s var(--drr-ease), color .12s var(--drr-ease);
+}
+.dshRunnerHeaderBtn > svg { width: 10px; height: 10px; }
+.dshRunnerHeaderBtn:hover { background: color-mix(in srgb, var(--drr-text) 14%, transparent); color: var(--drr-text); }
+.dshRunnerHeaderBtn[data-action="stop"]:hover { color: var(--drr-error-ink); background: color-mix(in srgb, var(--drr-text) 12%, transparent); }
+.dshRunnerHeaderBtn:disabled { opacity: .4; cursor: default; background: transparent; }
+
+.dshRunnerLogBubble {
+  position: fixed;
+  z-index: 10001;
+  display: flex;
+  flex-direction: column;
+  max-height: min(46vh, 380px);
+  border: 0;
+  border-radius: var(--drr-r-md);
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--drr-shadow-pop);
+  overflow: hidden;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--drr-text);
+  text-align: left;
+  animation: drr-pop .14s var(--drr-ease);
+}
+.dshRunnerLogBubbleHead { display: flex; align-items: center; gap: 7px; min-width: 0; flex: none; padding: 9px 11px; border-bottom: 1px solid var(--drr-line); white-space: nowrap; }
+.dshRunnerLogBubbleHead .dshRunnerDot { margin-top: 0; align-self: center; }
+.dshRunnerLogBubbleTitle { flex: 0 1 auto; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.dshRunnerLogBubbleMeta { flex: 0 1 auto; min-width: 0; font-size: 10.5px; color: var(--drr-text-3); overflow: hidden; text-overflow: ellipsis; }
+.dshRunnerLogBubbleLive { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; flex: none; font-size: 10px; color: var(--drr-ok-ink); }
+.dshRunnerLogBubbleLive::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 18%, transparent); animation: drr-pulse 1.8s ease-in-out infinite; }
+.dshRunnerLogBubbleLive[data-tone="error"] { color: var(--drr-error-ink); }
+.dshRunnerLogBubbleBody {
+  flex: 1 1 auto;
+  min-height: 96px;
+  max-height: min(42vh, 330px);
+  margin: 0;
+  padding: 10px 11px;
+  overflow: auto;
+  font-family: var(--drr-mono);
+  font-size: 10.5px;
+  line-height: 15px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: color-mix(in srgb, var(--drr-text) 4%, transparent);
+  color: var(--drr-text-2);
+  user-select: text;
+}
+.dshRunnerLogBubbleEmpty { padding: 18px 12px; font-size: 11px; line-height: 16px; color: var(--drr-text-3); }
+.dshRunnerLogBubbleError { padding: 12px; font-size: 11px; line-height: 16px; color: var(--drr-error-ink); word-break: break-word; }
+
+/* ---- 9. 错误条 / 端口冲突对话框 ---- */
+.dshRunnerError {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  flex-wrap: wrap;
+  flex: none;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--drr-error) 30%, transparent);
+  border-radius: var(--drr-r-sm);
+  background: color-mix(in srgb, var(--drr-error) 8%, transparent);
+  color: var(--drr-error-ink);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+.dshRunnerErrorIcon { flex: none; width: 14px; height: 14px; margin-top: 1px; }
+.dshRunnerErrorText { flex: 1 1 220px; min-width: 0; word-break: break-word; }
+.dshRunnerErrorDetail { flex: 0 0 100%; font-family: var(--drr-mono); font-size: 10.5px; line-height: 15px; color: var(--drr-text-2); word-break: break-word; opacity: .9; }
+.dshRunnerDialogBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, #000 44%, transparent);
+  animation: drr-fade .14s var(--drr-ease);
+}
+.dshRunnerDialog {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(720px, 100%);
+  max-height: min(84vh, 800px);
+  overflow: auto;
+  padding: 20px 22px;
+  border: 0;
+  border-radius: var(--drr-r-lg);
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--drr-shadow-pop);
+  animation: drr-pop .18s var(--drr-ease);
+}
+.dshRunnerDialogHead { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; line-height: 22px; letter-spacing: -.01em; }
+.dshRunnerDialogIcon { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; border-radius: 9px; background: color-mix(in srgb, var(--drr-warn) 14%, transparent); color: var(--drr-warn-ink); }
+.dshRunnerDialogIcon > svg { width: 16px; height: 16px; }
+.dshRunnerDialogSub { font-size: 11.5px; line-height: 17px; color: var(--drr-text-2); }
+.dshRunnerDialogSub strong { color: var(--drr-text); font-weight: 600; }
+.dshRunnerConflictEntry {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 11px 12px;
+  border-radius: var(--drr-r-sm);
+  background: var(--drr-fill-1);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+.dshRunnerConflictHead { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-weight: 600; color: var(--drr-text); }
+.dshRunnerConflictPort { font-family: var(--drr-mono); font-size: 11.5px; color: var(--drr-warn-ink); }
+.dshRunnerConflictMeta { color: var(--drr-text-2); word-break: break-word; }
+.dshRunnerConflictCode {
+  padding: 7px 9px;
+  border-radius: var(--drr-r-xs);
+  background: color-mix(in srgb, var(--drr-text) 6%, transparent);
+  color: var(--drr-text-2);
+  font-family: var(--drr-mono);
+  font-size: 10.5px;
+  line-height: 15px;
+  word-break: break-all;
+  max-height: 56px;
+  overflow: auto;
+  user-select: text;
+}
+.dshRunnerConflictTag {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 17px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--drr-warn) 34%, transparent);
+  color: var(--drr-warn-ink);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+}
+.dshRunnerDialogActions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; padding-top: 2px; }
+.dshRunnerDialogError { padding: 8px 10px; border-radius: var(--drr-r-xs); background: color-mix(in srgb, var(--drr-error) 10%, transparent); color: var(--drr-error-ink); font-size: 11.5px; line-height: 16px; word-break: break-word; }
+.dshRunnerDialogBusy { display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--drr-text-2); }
+.dshRunnerDialogBusy::before { content: ""; width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid color-mix(in srgb, var(--drr-text) 25%, transparent); border-top-color: var(--drr-text); animation: drr-spin .7s linear infinite; }
+@keyframes drr-spin { to { transform: rotate(360deg); } }
+
+/* ---- 10. 插件详情页更新区 ---- */
+.dshLimobUpdateBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--drr-warn) 34%, transparent);
+  background: color-mix(in srgb, var(--drr-warn) 12%, transparent);
+  color: var(--drr-warn-ink);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.dshLimobDetailSection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid var(--drr-line);
+  border-radius: var(--drr-r-md);
+  background: var(--drr-surface);
+  font-size: 12px;
+  line-height: 18px;
+}
+.dshLimobDetailTitle { font-size: 13px; font-weight: 600; line-height: 18px; }
+.dshLimobDetailMuted { color: var(--drr-text-3); }
+.dshLimobDetailCode {
+  display: block;
+  padding: 9px 11px;
+  border-radius: var(--drr-r-xs);
+  background: color-mix(in srgb, var(--drr-text) 5%, transparent);
+  font-family: var(--drr-mono);
+  font-size: 11px;
+  line-height: 16px;
+  word-break: break-all;
+  user-select: text;
+}
+.dshLimobDetailActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.dshLimobDetailBtn {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 11px;
+  border: 1px solid var(--drr-line-2);
+  border-radius: var(--drr-r-sm);
+  background: transparent;
+  color: var(--drr-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color .14s var(--drr-ease), border-color .14s var(--drr-ease), opacity .14s var(--drr-ease);
+}
+.dshLimobDetailBtn:hover { background: var(--drr-fill-1); }
+.dshLimobDetailBtn[disabled] { opacity: .55; cursor: default; }
+
+/* ---- 11. 动效降级 ---- */
+@media (prefers-reduced-motion: reduce) {
+  .dshRunnerPage *,
+  .dshRunnerDialog *,
+  .dshLimobCfgPage *,
+  .dshLimobCfgModal *,
+  .dshLimobRunDock *,
+  .dshLimobRunMenu *,
+  .dshRunnerHeaderFloat *,
+  .dshRunnerLogBubble * {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
+`;
 
     function ensureStyles() {
       if (typeof document === "undefined") return;
@@ -1287,28 +2237,80 @@ window.__ModuleLoader__.load({
       return parts.length > 0 ? parts[parts.length - 1] : String(path);
     }
 
-    /** 16x16 线性小图标（统一 viewBox/颜色，避免用文字符号或 emoji 当图标）。 */
-    function limobIcon(name) {
-      var base = { width: 15, height: 15, viewBox: "0 0 16 16", "aria-hidden": "true", focusable: "false" };
-      if (name === "up") return h("svg", base, h("path", { d: "M8 4l4 4H9v4H7V8H4l4-4z", fill: "currentColor" }));
-      if (name === "down") return h("svg", base, h("path", { d: "M8 12l-4-4h3V4h2v4h3l-4 4z", fill: "currentColor" }));
-      if (name === "edit") return h("svg", base, h("path", { d: "M3 11.5V13h1.5L12 5.5 10.5 4 3 11.5zM13.7 3.3a1 1 0 0 0 0-1.4l-.6-.6a1 1 0 0 0-1.4 0L11 2l1.9 1.9.8-.6z", fill: "currentColor" }));
-      if (name === "trash") return h("svg", base, h("path", { d: "M6.5 2h3l.5 1H13v1H3V3h3l.5-1zM4.2 5h7.6l-.6 8H4.8L4.2 5z", fill: "currentColor" }));
-      if (name === "close") return h("svg", base, h("path", { d: "M4.3 3.3L8 7l3.7-3.7 1.4 1.4L9.4 8.4l3.7 3.7-1.4 1.4L8 9.8l-3.7 3.7-1.4-1.4 3.7-3.7-3.7-3.7z", fill: "currentColor" }));
-      if (name === "plus") return h("svg", base, h("path", { d: "M7 3h2v4h4v2H9v4H7V9H3V7h4V3z", fill: "currentColor" }));
-      return null;
+    /**
+     * 插件图标集：统一 24 网格 / 2px 描边 / round 端点，只用 SVG，不用文字符号或 emoji。
+     * 播放、停止是实心（媒体控件惯例），其余为线性图标；颜色一律 currentColor。
+     */
+    var LIMOB_ICONS = {
+      play: { solid: true, paths: ["M8 4.8v14.4L20 12z"] },
+      stop: { solid: true, paths: ["M8.2 6h7.6A2.2 2.2 0 0 1 18 8.2v7.6a2.2 2.2 0 0 1-2.2 2.2H8.2A2.2 2.2 0 0 1 6 15.8V8.2A2.2 2.2 0 0 1 8.2 6z"] },
+      restart: { paths: ["M1 4v6h6", "M3.5 15a9 9 0 1 0 2.1-9.4L1 10"] },
+      refresh: { paths: ["M23 4v6h-6", "M1 20v-6h6", "M3.5 9a9 9 0 0 1 14.9-3.4L23 10", "M1 14l4.6 4.4A9 9 0 0 0 20.5 15"] },
+      chevron: { paths: ["M6 9l6 6 6-6"] },
+      plus: { paths: ["M12 5v14", "M5 12h14"] },
+      close: { paths: ["M6 6l12 12", "M18 6L6 18"] },
+      trash: { paths: ["M3.5 6.5h17", "M8.5 6.5V4.8A1.8 1.8 0 0 1 10.3 3h3.4a1.8 1.8 0 0 1 1.8 1.8v1.7", "M6.2 6.5l.9 12a2 2 0 0 0 2 1.9h5.8a2 2 0 0 0 2-1.9l.9-12", "M10 10.5v6.5", "M14 10.5v6.5"] },
+      edit: { paths: ["M17.4 3.6a2.2 2.2 0 0 1 3 3L8 19l-4 1 1-4z"] },
+      up: { paths: ["M12 19V5", "M5.5 11.5 12 5l6.5 6.5"] },
+      down: { paths: ["M12 5v14", "M18.5 12.5 12 19l-6.5-6.5"] },
+      sliders: { paths: ["M4 8h3.5", "M11.5 8H20", "M4 16h8", "M16 16h4"], dots: [[9.5, 8], [14, 16]] },
+      copy: { paths: ["M20 9h-8.5A2.5 2.5 0 0 0 9 11.5V20a2.5 2.5 0 0 0 2.5 2.5H20A2.5 2.5 0 0 0 22.5 20v-8.5A2.5 2.5 0 0 0 20 9z", "M5 15H4.5A2.5 2.5 0 0 1 2 12.5v-8A2.5 2.5 0 0 1 4.5 2h8A2.5 2.5 0 0 1 15 4.5V5"] },
+      terminal: { paths: ["M4 17l6-6-6-6", "M12 19h8"] },
+      alert: { paths: ["M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z", "M12 9v4", "M12 17h.01"] },
+      check: { paths: ["M20 6 9 17l-5-5"] }
+    };
+
+    /** 取一个图标：limobIcon("play", 13)。未知名字返回 null（不渲染）。 */
+    function limobIcon(name, size) {
+      var spec = LIMOB_ICONS[name];
+      if (spec === undefined) return null;
+      var pixels = typeof size === "number" && size > 0 ? size : 15;
+      var solid = spec.solid === true;
+      var children = [];
+      for (var i = 0; i < spec.paths.length; i += 1) {
+        children.push(h("path", { key: "p" + String(i), d: spec.paths[i] }));
+      }
+      if (Array.isArray(spec.dots)) {
+        for (var j = 0; j < spec.dots.length; j += 1) {
+          children.push(h("circle", {
+            key: "c" + String(j),
+            cx: spec.dots[j][0],
+            cy: spec.dots[j][1],
+            r: 2.2,
+            fill: "currentColor",
+            stroke: "none"
+          }));
+        }
+      }
+      return h("svg", {
+        width: pixels,
+        height: pixels,
+        viewBox: "0 0 24 24",
+        "aria-hidden": "true",
+        focusable: "false",
+        fill: solid ? "currentColor" : "none",
+        stroke: solid ? "currentColor" : "currentColor",
+        "stroke-width": solid ? "1.2" : "2",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round"
+      }, children);
     }
 
-    /** 左侧导航「运行」面板图标：播放三角（props.size）。 */
+    /** 左侧导航「运行」面板图标：描边播放三角（props.size），与宿主图标同为线性风格。 */
     function RunnerPanelIcon(props) {
       var size = props !== undefined && props !== null && typeof props.size === "number" ? props.size : 16;
       return h("svg", {
         width: size,
         height: size,
-        viewBox: "0 0 16 16",
+        viewBox: "0 0 24 24",
         "aria-hidden": "true",
-        focusable: "false"
-      }, h("path", { d: "M5 3.2l8 4.8-8 4.8V3.2z", fill: "currentColor" }));
+        focusable: "false",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "1.8",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round"
+      }, h("path", { d: "M8.5 4.8v14.4L20 12z" }));
     }
 
     // =====================================================================
@@ -1718,18 +2720,19 @@ window.__ModuleLoader__.load({
             title: "关闭",
             "aria-label": "关闭",
             onClick: function () { setEditing(null); setError(""); }
-          }, limobIcon("close"))),
+          }, limobIcon("close", 15))),
         h("div", { className: "dshLimobFormGrid" },
           h("label", { className: "dshLimobFormField" },
             h("span", null, "名称 *"),
             h("input", {
               className: "dshLimobInput",
+              autoFocus: true,
               value: editing.title,
               placeholder: "例如：调试后端",
               onChange: function (event) { updateDraft("title", event.target.value); }
             })),
           h("label", { className: "dshLimobFormField" },
-            h("span", null, "触发端口（逗号分隔）"),
+            h("span", null, "触发端口"),
             h("input", {
               className: "dshLimobInput",
               value: editing.portsText,
@@ -1845,7 +2848,7 @@ window.__ModuleLoader__.load({
           error !== "" ? h("span", { className: "dshLimobFormError" }, error) : null,
           h("button", {
             type: "button",
-            className: "dshLimobCfgBtn",
+            className: "dshLimobCfgBtn dshLimobCfgBtnGhost",
             onClick: function () { setEditing(null); setError(""); }
           }, "取消"),
           h("button", {
@@ -1858,7 +2861,10 @@ window.__ModuleLoader__.load({
       var list = commands.length === 0
         ? h("div", { className: "dshLimobCmdList" },
             h("div", { className: "dshLimobCfgEmpty" },
-              configLoaded ? "还没有命令，点右上角「+ 新增」添加一条。" : "正在从 Host 读取命令配置…"))
+              h("div", { className: "dshRunnerEmptyIcon" }, limobIcon(configLoaded ? "terminal" : "refresh", 18)),
+              h("div", { className: "dshRunnerEmptyTitle" }, configLoaded ? "还没有命令" : "正在读取命令配置"),
+              h("div", { className: "dshRunnerEmptyHint" },
+                configLoaded ? "点右上角「新增」添加第一条，或让 AI 用 dsh_runner_config 创建。" : "稍候，Host 返回后会自动刷新。")))
         : h("div", { className: "dshLimobCmdList" },
             commands.map(function (command, index) {
               var projectLabel = command.scope === "project"
@@ -1893,36 +2899,36 @@ window.__ModuleLoader__.load({
                       type: "button",
                       className: "dshLimobIconBtn",
                       title: "上移",
-                      "aria-label": "上移",
+                      "aria-label": "上移 " + command.title,
                       disabled: index === 0 || busy,
                       onClick: function () { moveCommand(index, -1); }
-                    }, limobIcon("up")),
+                    }, limobIcon("up", 15)),
                     h("button", {
                       key: "down",
                       type: "button",
                       className: "dshLimobIconBtn",
                       title: "下移",
-                      "aria-label": "下移",
+                      "aria-label": "下移 " + command.title,
                       disabled: index === commands.length - 1 || busy,
                       onClick: function () { moveCommand(index, 1); }
-                    }, limobIcon("down")),
+                    }, limobIcon("down", 15)),
                     h("button", {
                       key: "edit",
                       type: "button",
                       className: "dshLimobIconBtn",
                       title: "编辑",
-                      "aria-label": "编辑",
+                      "aria-label": "编辑 " + command.title,
                       onClick: function () { startEdit(command); }
-                    }, limobIcon("edit")),
+                    }, limobIcon("edit", 15)),
                     h("button", {
                       key: "delete",
                       type: "button",
                       className: "dshLimobIconBtn",
                       "data-danger": "true",
                       title: "删除",
-                      "aria-label": "删除",
+                      "aria-label": "删除 " + command.title,
                       onClick: function () { setPendingDelete(command.id); }
-                    }, limobIcon("trash"))
+                    }, limobIcon("trash", 15))
                   ];
               return h("div", {
                 key: command.id,
@@ -1955,13 +2961,14 @@ window.__ModuleLoader__.load({
           h("button", {
             type: "button",
             className: "dshLimobCfgBtn dshLimobCfgBtnPrimary",
+            "data-action": "create-command",
             disabled: busy,
             onClick: startCreate
-          }, limobIcon("plus"), h("span", null, "新增"))),
+          }, limobIcon("plus", 14), h("span", null, "新增"))),
+        notice !== "" ? h("div", { className: "dshLimobCfgNotice", role: "status" }, limobIcon("check", 13), h("span", null, notice)) : null,
         form,
         list,
-        error !== "" ? h("div", { className: "dshLimobCfgError" }, error) : null,
-        notice !== "" ? h("div", { className: "dshLimobCfgNotice" }, notice) : null);
+        error !== "" ? h("div", { className: "dshLimobCfgError", role: "alert" }, error) : null);
     }
 
     // =====================================================================
@@ -2748,23 +3755,46 @@ window.__ModuleLoader__.load({
       }
 
       var runningTotal = 0;
+      var failedTotal = 0;
       for (var totalIndex = 0; totalIndex < runners.length; totalIndex += 1) {
         var totalRunner = runners[totalIndex];
-        if (totalRunner !== null && totalRunner !== undefined
-          && (totalRunner.status === "running" || totalRunner.status === "starting" || totalRunner.status === "stopping")) {
+        if (totalRunner === null || totalRunner === undefined) continue;
+        if (totalRunner.status === "running" || totalRunner.status === "starting" || totalRunner.status === "stopping") {
           runningTotal += 1;
+        } else if (totalRunner.status === "failed" || totalRunner.status === "exited") {
+          failedTotal += 1;
         }
+      }
+      var externalTotal = 0;
+      for (var externalIndex = 0; externalIndex < diagnose.length; externalIndex += 1) {
+        var externalEntry = diagnose[externalIndex];
+        if (externalEntry === null || externalEntry === undefined) continue;
+        if (externalEntry.occupant === null || externalEntry.occupant === undefined || externalEntry.occupant.managed === true) continue;
+        var externalProcess = externalEntry.kind === "process" && Array.isArray(externalEntry.processes) && externalEntry.processes.length > 0;
+        if (externalEntry.listening === true || externalProcess) externalTotal += 1;
       }
       var projectCount = 0;
       for (var projectIndex = 0; projectIndex < sections.length; projectIndex += 1) {
         if (sections[projectIndex].global !== true) projectCount += 1;
       }
 
+      function summaryChip(tone, text, title) {
+        return h("span", { className: "dshRunnerSummary", "data-tone": tone, title: title }, [
+          h("span", { key: "dot", className: "dshRunnerSummaryDot" }),
+          h("span", { key: "text" }, text)
+        ]);
+      }
+      var summaryDots = [];
+      if (runningTotal > 0) summaryDots.push(summaryChip("running", String(runningTotal) + " 运行中", String(runningTotal) + " 个命令正在运行或启动中"));
+      if (failedTotal > 0) summaryDots.push(summaryChip("failed", String(failedTotal) + " 失败", String(failedTotal) + " 个命令启动失败或已退出"));
+      if (externalTotal > 0) summaryDots.push(summaryChip("external", String(externalTotal) + " 外部", String(externalTotal) + " 个端口/进程由插件之外的实例占用"));
+
       var errorBar = error === null || error === undefined ? null : h("div", {
         className: "dshRunnerError",
         "data-dsh-runner-error": "1",
         role: "alert"
       },
+        h("span", { className: "dshRunnerErrorIcon" }, limobIcon("alert", 14)),
         h("span", { className: "dshRunnerErrorText" }, "错误：" + messageOf(error)),
         h("button", {
           type: "button",
@@ -2838,6 +3868,65 @@ window.__ModuleLoader__.load({
           disabled: disabled,
           runnerOnly: row.runnerOnly === true
         });
+        var showRestart = rowActions.restart === true && status !== "idle" && status !== "stopped";
+        function rowButton(action, iconName, iconSize, label, title, enabled, handler) {
+          return h("button", {
+            type: "button",
+            className: "dshRunnerMiniBtn",
+            "data-action": action,
+            title: title,
+            "aria-label": label + "：" + String(command.title),
+            disabled: rowBusy || enabled !== true,
+            onClick: function (event) {
+              event.stopPropagation();
+              handler();
+            }
+          }, limobIcon(iconName, iconSize), h("span", null, label));
+        }
+        function rowIconButton(action, iconName, iconSize, label, title, enabled, handler) {
+          return h("button", {
+            type: "button",
+            className: "dshLimobIconBtn",
+            "data-action": action,
+            title: title,
+            "aria-label": label + "：" + String(command.title),
+            disabled: rowBusy || enabled !== true,
+            onClick: function (event) {
+              event.stopPropagation();
+              handler();
+            }
+          }, limobIcon(iconName, iconSize));
+        }
+        // 每行只保留「一个带文字的主操作 + 至多一个图标次要操作」，避免三连按钮的噪音。
+        var primaryAction = null;
+        var primaryIsRestart = false;
+        if (rowActions.adopt) {
+          primaryAction = rowButton("adopt", "play", 12, "接管", "把这个外部实例纳入托管（只改归属，不结束进程），之后就能在面板里停止/重启它", true, function () {
+            runAdopt(command.id, projectPath, external);
+          });
+        } else if (rowActions.start) {
+          primaryAction = rowButton("start", "play", 12, "启动", "启动命令", true, function () {
+            runAction("start", command.id, projectPath);
+          });
+        } else if (rowActions.stop) {
+          primaryAction = rowButton("stop", "stop", 10, "停止", "停止命令", true, function () {
+            runAction("stop", command.id, projectPath);
+          });
+        } else if (showRestart) {
+          primaryIsRestart = true;
+          primaryAction = rowButton("restart", "restart", 13, "重启", "先停止再重新启动", true, function () {
+            if (!hasRunner && external !== undefined) openExternalConflict(external, command.id, projectPath, "restart");
+            else runAction("restart", command.id, projectPath);
+          });
+        }
+        var secondaryAction = primaryAction !== null && showRestart && !primaryIsRestart
+          ? rowIconButton("restart", "restart", 13, "重启", rowActions.adopt
+              ? "结束当前外部实例，改由插件启动（之后可看实时日志）"
+              : "先停止再重新启动", true, function () {
+              if (!hasRunner && external !== undefined) openExternalConflict(external, command.id, projectPath, "restart");
+              else runAction("restart", command.id, projectPath);
+            })
+          : null;
         return h("div", {
           key: rowKey,
           className: "dshRunnerRow",
@@ -2864,66 +3953,31 @@ window.__ModuleLoader__.load({
                     title: "该实例不是本插件启动的，已纳入托管：可以停止/重启，但无法回放它的输出"
                   }, "外部接管")
                 : null,
-              h("span", { className: "dshRunnerStateText", "data-status": status }, runnerStatusText(status))),
-            h("div", { className: "dshRunnerRowCmd", title: String(command.command) }, String(command.command)),
-            h("div", { className: "dshRunnerRowMeta" },
-              declaredPorts.map(function (port) {
-                return h("span", { key: "declared-" + String(port), className: "dshRunnerPort", title: "声明端口 " + String(port) }, ":" + String(port));
-              }),
-              extraPorts.map(function (port) {
-                return h("span", {
-                  key: "actual-" + String(port),
-                  className: "dshRunnerPort dshRunnerPortWarn",
-                  title: "实际监听端口（未在声明 ports 中）"
-                }, "实际 :" + String(port));
-              }),
-              missingPorts.map(function (port) {
-                return h("span", {
-                  key: "missing-" + String(port),
-                  className: "dshRunnerPort dshRunnerPortWarn",
-                  title: "声明端口当前未被本命令的进程监听"
-                }, "未绑定 :" + String(port));
-              }),
-              meta)),
+              h("span", { className: "dshRunnerState", "data-status": status }, runnerStatusText(status))),
+            h("div", { className: "dshRunnerRowMetaLine" },
+              h("span", { className: "dshRunnerRowCmd", title: String(command.command) }, String(command.command)),
+              h("div", { className: "dshRunnerRowMeta" },
+                declaredPorts.map(function (port) {
+                  return h("span", { key: "declared-" + String(port), className: "dshRunnerPort", title: "声明端口 " + String(port) }, ":" + String(port));
+                }),
+                extraPorts.map(function (port) {
+                  return h("span", {
+                    key: "actual-" + String(port),
+                    className: "dshRunnerPort dshRunnerPortWarn",
+                    title: "实际监听端口（未在声明 ports 中）"
+                  }, "实际 :" + String(port));
+                }),
+                missingPorts.map(function (port) {
+                  return h("span", {
+                    key: "missing-" + String(port),
+                    className: "dshRunnerPort dshRunnerPortWarn",
+                    title: "声明端口当前未被本命令的进程监听"
+                  }, "未绑定 :" + String(port));
+                }),
+                meta))),
           h("div", { className: "dshRunnerRowActions" },
-            h("button", {
-              type: "button",
-              className: "dshRunnerMiniBtn",
-              "data-action": rowActions.adopt ? "adopt" : "start",
-              title: rowActions.adopt
-                ? "把这个外部实例纳入托管（只改归属，不结束进程），之后就能在面板里停止/重启它"
-                : "启动命令",
-              disabled: rowBusy || !(rowActions.adopt || rowActions.start),
-              onClick: function (event) {
-                event.stopPropagation();
-                if (rowActions.adopt) runAdopt(command.id, projectPath, external);
-                else runAction("start", command.id, projectPath);
-              }
-            }, rowActions.adopt ? "接管" : "启动"),
-            h("button", {
-              type: "button",
-              className: "dshRunnerMiniBtn",
-              "data-action": "stop",
-              disabled: rowBusy || !rowActions.stop,
-              onClick: function (event) {
-                event.stopPropagation();
-                runAction("stop", command.id, projectPath);
-              }
-            }, "停止"),
-            h("button", {
-              type: "button",
-              className: "dshRunnerMiniBtn",
-              "data-action": "restart",
-              title: rowActions.adopt
-                ? "结束当前外部实例，改由插件启动（之后可看实时日志）"
-                : "先停止再重新启动",
-              disabled: rowBusy || !rowActions.restart,
-              onClick: function (event) {
-                event.stopPropagation();
-                if (!hasRunner && external !== undefined) openExternalConflict(external, command.id, projectPath, "restart");
-                else runAction("restart", command.id, projectPath);
-              }
-            }, "重启")));
+            primaryAction,
+            secondaryAction));
       }
 
       function renderSection(section) {
@@ -2958,50 +4012,62 @@ window.__ModuleLoader__.load({
           "data-current": isCurrent ? "true" : "false",
           "data-collapsed": collapsed ? "true" : "false"
         },
-          h("div", { className: "dshRunnerSectionHead", style: { background: sectionColor.tint } },
+          h("div", { className: "dshRunnerSectionHead" },
             h("button", {
               type: "button",
               className: "dshRunnerSectionToggle",
               "data-action": "toggle-section",
               "aria-expanded": collapsed ? "false" : "true",
+              "aria-label": (collapsed ? "展开 " : "折叠 ") + sectionTitle,
               title: collapsed ? "展开该工作区" : "折叠该工作区",
               onClick: function () { toggleSection(section); }
-            }, collapsed ? "▸" : "▾"),
+            }, limobIcon("chevron", 14)),
             section.global === true ? null : h("button", {
               type: "button",
               className: "dshRunnerColorSwatch",
               "data-action": "project-color",
+              "aria-label": "设置 " + sectionTitle + " 的项目颜色",
               title: "设置项目底色",
-              style: { background: sectionColor.accent },
+              style: { "--drr-swatch": sectionColor.accent, background: sectionColor.accent },
               onClick: function (event) {
                 event.stopPropagation();
                 setColorPicker(colorPicker === section.key ? null : section.key);
               }
             }),
             h("div", { className: "dshRunnerSectionInfo" },
-              h("span", { className: "dshRunnerSectionTitle", title: section.projectPath === undefined ? "" : section.projectPath }, sectionTitle),
-              isCurrent ? h("span", { className: "dshLimobTag" }, "当前") : null,
+              h("div", { className: "dshRunnerSectionTitleLine" },
+                h("span", { className: "dshRunnerSectionTitle", title: section.projectPath === undefined ? "" : section.projectPath }, sectionTitle),
+                isCurrent ? h("span", { className: "dshLimobTag", "data-current": "true", title: "当前会话所在项目" }, "当前") : null,
+                h("span", {
+                  className: "dshRunnerSectionCount",
+                  "data-tone": runningCount > 0 ? "active" : "idle",
+                  title: String(runningCount) + " 个运行中 / 共 " + String(rows.length) + " 条命令"
+                }, String(runningCount) + " / " + String(rows.length)),
+                externalCount > 0 ? h("span", { className: "dshRunnerSectionIssue", title: "有端口被插件之外的进程占用" }, "外部 " + String(externalCount)) : null,
+                failedCount > 0 ? h("span", { className: "dshRunnerSectionIssue", title: "有命令启动失败或已退出" }, "异常 " + String(failedCount)) : null),
               h("span", { className: "dshRunnerSectionPath", title: section.projectPath === undefined ? "" : section.projectPath },
-                section.projectPath === undefined ? "未选择项目会话" : section.projectPath),
-              h("span", { className: "dshRunnerSectionCount" }, String(runningCount) + " / " + String(rows.length) + " 运行"),
-              externalCount > 0 ? h("span", { className: "dshRunnerSectionIssue" }, "外部 " + String(externalCount)) : null,
-              failedCount > 0 ? h("span", { className: "dshRunnerSectionIssue" }, "异常 " + String(failedCount)) : null),
+                section.projectPath === undefined ? "未选择项目会话" : section.projectPath)),
             section.global === true ? null : h("div", { className: "dshRunnerSectionActions" },
               h("button", {
                 type: "button",
-                className: "dshRunnerMiniBtn",
+                className: "dshLimobIconBtn",
                 "data-action": "start-all",
+                title: "按依赖顺序启动本组全部命令",
+                "aria-label": "启动 " + sectionTitle + " 的全部命令",
                 disabled: flow !== null,
                 onClick: function () { runStartAll(section.projectPath); }
-              }, "本组启动"),
+              }, limobIcon("play", 14)),
               h("button", {
                 type: "button",
-                className: "dshRunnerMiniBtn",
+                className: "dshLimobIconBtn",
                 "data-action": "stop-all",
+                title: "停止本组全部命令",
+                "aria-label": "停止 " + sectionTitle + " 的全部命令",
                 disabled: flow !== null,
                 onClick: function () { runStopAll(section.projectPath); }
-              }, "本组停止"))),
+              }, limobIcon("stop", 13)))),
           section.global === true || colorPicker !== section.key ? null : h("div", { className: "dshRunnerColorRow" },
+            h("span", { className: "dshRunnerColorLabel" }, "项目颜色"),
             projectColorPalette().map(function (color) {
               return h("button", {
                 key: color.id,
@@ -3009,13 +4075,15 @@ window.__ModuleLoader__.load({
                 className: "dshRunnerColorChip",
                 "data-color": color.id,
                 title: color.id,
-                style: { background: color.accent },
+                "aria-label": "使用 " + color.id + " 色",
+                style: { background: color.accent, color: color.accent },
                 onClick: function () { setProjectColor(section.projectPath, color.id); }
               });
             }),
             h("button", {
               type: "button",
               className: "dshRunnerColorAuto",
+              title: "恢复按项目路径自动配色",
               onClick: function () { setProjectColor(section.projectPath, null); }
             }, "自动")),
           collapsed
@@ -3047,46 +4115,78 @@ window.__ModuleLoader__.load({
         : runnerByKey[compositeKey(selectedProjectPath, selected.commandId)];
       var selectedAdoptedExternal = selectedRunner !== undefined && selectedRunner.external === true;
       var selectedAdoptedPid = selectedAdoptedExternal && typeof selectedRunner.pid === "number" ? selectedRunner.pid : null;
+      var selectedExternal = selected === null || selected === undefined
+        ? undefined
+        : (selectedRunner === undefined ? externalOccupancyForCommand(diagnose, selected.commandId, selectedProjectPath) : undefined);
+      var selectedStatus = selected === null || selected === undefined
+        ? "idle"
+        : (selectedRunner !== undefined && typeof selectedRunner.status === "string"
+          ? selectedRunner.status
+          : (selectedExternal !== undefined ? "external" : "idle"));
 
-      var logPane = h("div", { className: "dshRunnerLogPane" },
-        h("div", { className: "dshRunnerLogHead" },
-          h("span", { className: "dshRunnerLogTitle", title: selectedProjectPath === "" ? selectedTitle : selectedProjectPath },
-            selectedTitle === "" ? "日志" : selectedTitle + " · 日志"),
-          selectedProjectPath === "" ? null : h("span", { className: "dshRunnerLogMeta", title: selectedProjectPath }, selectedProjectPath),
-          h("span", { className: "dshRunnerLogMeta" }, logMeta),
-          selectedAdoptedExternal ? h("button", {
-            type: "button",
-            className: "dshRunnerMiniBtn",
-            "data-action": "release-takeover",
-            disabled: selected === null || selected === undefined || isRowPending(selectedProjectPath, selected.commandId),
-            title: "不结束进程，只把这条命令移出托管；之后它重新显示为「外部运行中」",
-            onClick: function () { releaseAdopted(selectedProjectPath, selected.commandId); }
-          }, "取消接管") : null,
-          h("button", {
-            type: "button",
-            className: "dshRunnerMiniBtn",
-            disabled: selected === null || selected === undefined || flow !== null,
-            onClick: clearLog
-          }, "清空日志"),
-          h("button", {
-            type: "button",
-            className: "dshRunnerMiniBtn",
-            disabled: logText === "",
-            onClick: copyLog
-          }, copied ? "已复制" : "复制"),
-          selectedAdoptedExternal ? h("div", { className: "dshRunnerLogNote", "data-external-log": "1" },
-            "外部接管实例" + (selectedAdoptedPid === null ? "" : "（PID " + String(selectedAdoptedPid) + "）")
-              + "：它不是插件启动的，输出无法回放，下面只是此前托管运行留下的日志。点「重启」改由插件启动后即可看实时日志。") : null),
-        h("pre", {
+      var logBody;
+      if (selected === null || selected === undefined) {
+        logBody = h("div", { className: "dshRunnerLogEmpty" },
+          h("div", { className: "dshRunnerEmptyIcon" }, limobIcon("terminal", 19)),
+          h("div", { className: "dshRunnerEmptyTitle" }, "选择一条命令查看日志"),
+          h("div", { className: "dshRunnerEmptyHint" }, "点左侧任意命令行，这里会显示它的实时输出。"));
+      } else if (logPending) {
+        logBody = h("div", { className: "dshRunnerLogEmpty" },
+          h("div", { className: "dshRunnerLoadingLine", style: { width: "140px" } }),
+          h("div", { className: "dshRunnerEmptyHint" }, "正在读取日志…"));
+      } else if (logText === "") {
+        logBody = h("div", { className: "dshRunnerLogEmpty" },
+          h("div", { className: "dshRunnerEmptyIcon" }, limobIcon("terminal", 19)),
+          h("div", { className: "dshRunnerEmptyTitle" }, "还没有日志输出"),
+          h("div", { className: "dshRunnerEmptyHint" }, "服务启动后打印的内容会实时出现在这里。"));
+      } else {
+        logBody = h("pre", {
           className: "dshRunnerPre",
           "data-dsh-runner-log": "1",
           ref: logRef,
           onScroll: handleLogScroll
-        }, selected === null || selected === undefined
-          ? "点左侧命令行查看运行日志。"
-          : logPending
-            ? "（正在读取日志…）"
-            : (logText === "" ? "（暂无日志）" : logText)));
+        }, logText);
+      }
+
+      var logPane = h("div", { className: "dshRunnerLogPane" },
+        h("div", { className: "dshRunnerLogHead" },
+          h("span", { className: "dshRunnerLogTitle", title: selectedProjectPath === "" ? selectedTitle : selectedProjectPath },
+            selected === null || selected === undefined ? null : h("span", { className: "dshRunnerDot", "data-status": selectedStatus }),
+            h("span", null, selectedTitle === "" ? "日志" : selectedTitle)),
+          selected === null || selected === undefined ? null : h("span", { className: "dshRunnerState", "data-status": selectedStatus }, runnerStatusText(selectedStatus)),
+          selectedProjectPath === "" ? null : h("span", { className: "dshRunnerLogMeta", "data-path": "true", title: selectedProjectPath }, selectedProjectPath),
+          selected === null || selected === undefined ? null : h("span", { className: "dshRunnerLogMeta" }, logMeta),
+          h("div", { className: "dshRunnerLogTools" },
+            selectedAdoptedExternal ? h("button", {
+              type: "button",
+              className: "dshRunnerMiniBtn",
+              "data-action": "release-takeover",
+              disabled: selected === null || selected === undefined || isRowPending(selectedProjectPath, selected.commandId),
+              title: "不结束进程，只把这条命令移出托管；之后它重新显示为「外部运行中」",
+              onClick: function () { releaseAdopted(selectedProjectPath, selected.commandId); }
+            }, "取消接管") : null,
+            h("button", {
+              type: "button",
+              className: "dshLimobIconBtn",
+              title: copied ? "已复制到剪贴板" : "复制日志",
+              "aria-label": "复制日志",
+              disabled: logText === "" || copied,
+              onClick: copyLog
+            }, limobIcon(copied ? "check" : "copy", 14)),
+            h("button", {
+              type: "button",
+              className: "dshLimobIconBtn",
+              title: "清空这条命令的日志文件",
+              "aria-label": "清空日志",
+              disabled: selected === null || selected === undefined || flow !== null,
+              onClick: clearLog
+            }, limobIcon("trash", 14))),
+          selectedAdoptedExternal ? h("div", { className: "dshRunnerLogNote", "data-external-log": "1" },
+            limobIcon("alert", 13),
+            h("span", null,
+              "外部接管实例" + (selectedAdoptedPid === null ? "" : "（PID " + String(selectedAdoptedPid) + "）")
+                + "：它不是插件启动的，输出无法回放，下面只是此前托管运行留下的日志。点「重启」改由插件启动后即可看实时日志。")) : null),
+        logBody);
 
       function renderConflictEntry(item, index) {
         var occupant = item !== null && item !== undefined && item.occupant !== null && item.occupant !== undefined
@@ -3135,9 +4235,12 @@ window.__ModuleLoader__.load({
         }
       },
         h("div", { className: "dshRunnerDialog", "data-dsh-runner-conflict": "1" },
-          h("div", { className: "dshRunnerDialogHead" }, conflict.takeOver === true ? "外部实例正在运行" : "端口被占用"),
+          h("div", { className: "dshRunnerDialogHead" },
+            h("span", { className: "dshRunnerDialogIcon" }, limobIcon("alert", 16)),
+            h("span", null, conflict.takeOver === true ? "外部实例正在运行" : "端口被占用")),
           h("div", { className: "dshRunnerDialogSub" },
-            "项目：" + String(conflict.projectPath === undefined ? "未知" : conflict.projectPath)),
+            "项目 ",
+            h("strong", null, String(conflict.projectPath === undefined ? "未知" : conflict.projectPath))),
           h("div", { className: "dshRunnerDialogSub" },
             conflict.takeOver === true
               ? "「" + titleOfCommand(conflict.commandId) + "」现在运行的是插件之外启动的实例。"
@@ -3166,7 +4269,7 @@ window.__ModuleLoader__.load({
             }, "取消"),
             h("button", {
               type: "button",
-              className: "dshLimobCfgBtn dshLimobCfgBtnPrimary",
+              className: "dshLimobCfgBtn dshLimobCfgBtnDangerSolid",
               "data-action": conflict.takeOver === true ? "takeover-restart" : "kill-and-start",
               disabled: conflictBusy,
               onClick: resolveConflict
@@ -3178,47 +4281,66 @@ window.__ModuleLoader__.load({
           if (event.target === event.currentTarget) setEditorOpen(false);
         }
       },
-        h("div", { className: "dshLimobCfgModal" },
-          h("div", { className: "dshLimobCfgH", style: { marginBottom: "10px" } },
-            h("span", null, "dsh-runner · 命令配置"),
+        h("div", { className: "dshLimobCfgModal", role: "dialog", "aria-modal": "true", "aria-label": "命令配置" },
+          h("div", { className: "dshLimobCfgModalHead" },
+            h("div", { className: "dshLimobCfgModalTitle" },
+              h("span", null, "命令配置"),
+              h("span", null, "dsh-runner · 新增、编辑、排序与启停")),
             h("button", {
               type: "button",
-              className: "dshLimobCfgBtn",
+              className: "dshLimobIconBtn",
+              title: "关闭",
+              "aria-label": "关闭",
               onClick: function () { setEditorOpen(false); }
-            }, "关闭")),
-          h(ConfigEditor, {
-            currentProjectPath: currentProjectPath,
-            workspaces: workspaceOptions
-          })));
+            }, limobIcon("close", 15))),
+          h("div", { className: "dshLimobCfgModalBody" },
+            h(ConfigEditor, {
+              currentProjectPath: currentProjectPath,
+              workspaces: workspaceOptions
+            }))));
 
       return h("div", { className: "dshRunnerPage", "data-dsh-runner-page": "1" },
         h("div", { className: "dshRunnerHead" },
           h("div", { className: "dshRunnerHeadMain" },
             h("span", { className: "dshRunnerTitle" }, "运行"),
-            h("span", { className: "dshRunnerProject" }, "全部项目"),
-            h("span", { className: "dshRunnerGlobalSummary" },
-              String(projectCount) + " 个项目 · " + String(runningTotal) + " 个运行中")),
+            h("div", { className: "dshRunnerSub" },
+              h("span", { className: "dshRunnerProject" }, "全部项目"),
+              h("span", { className: "dshRunnerSepDot" }),
+              h("span", null, String(projectCount) + " 个项目"),
+              summaryDots.length > 0 ? h("span", { className: "dshRunnerSepDot" }) : null,
+              summaryDots)),
           h("div", { className: "dshRunnerToolbar" },
             h("button", {
               type: "button",
-              className: "dshLimobCfgBtn",
+              className: "dshLimobCfgBtn dshLimobCfgBtnGhost",
+              "data-action": "refresh",
               disabled: flow !== null,
+              title: "重新读取命令配置与运行状态",
               onClick: refresh
-            }, flow === "refresh" ? "刷新中…" : "刷新"),
+            }, limobIcon("refresh", 14), h("span", null, flow === "refresh" ? "刷新中…" : "刷新")),
             h("button", {
               type: "button",
-              className: "dshLimobCfgBtn dshLimobCfgBtnPrimary",
+              className: "dshLimobCfgBtn",
+              "data-action": "manage",
+              title: "新增 / 编辑 / 排序 / 删除命令",
               onClick: function () { setEditorOpen(true); }
-            }, "管理命令"))),
+            }, limobIcon("sliders", 14), h("span", null, "管理命令")))),
         errorBar,
         h("div", { className: "dshRunnerBody" },
           !(uiLoaded && configReady)
             ? h("div", { className: "dshRunnerList", "data-dsh-runner-all": "1" },
-                h("div", { className: "dshRunnerEmpty" }, "正在读取运行面板状态…"))
+                h("div", { className: "dshRunnerLoading", "aria-busy": "true" },
+                  h("div", { className: "dshRunnerLoadingLine", style: { width: "48%" } }),
+                  h("div", { className: "dshRunnerLoadingLine", style: { width: "72%" } }),
+                  h("div", { className: "dshRunnerLoadingLine", style: { width: "58%" } }),
+                  h("div", { className: "dshRunnerLoadingLine", style: { width: "66%" } }),
+                  h("div", { className: "dshRunnerEmptyHint", style: { marginTop: "10px" } }, "正在读取运行面板状态…")))
             : (sections.length === 0
               ? h("div", { className: "dshRunnerList", "data-dsh-runner-all": "1" },
                   h("div", { className: "dshRunnerEmpty" },
-                    "还没有配置任何命令。点右上角「管理命令」新增，或在「设置 → dsh-runner」里编辑。"))
+                    h("div", { className: "dshRunnerEmptyIcon" }, limobIcon("terminal", 19)),
+                    h("div", { className: "dshRunnerEmptyTitle" }, "还没有配置任何命令"),
+                    h("div", { className: "dshRunnerEmptyHint" }, "点右上角「管理命令」新增，或在「设置 → dsh-runner」里编辑。")))
               : h("div", { className: "dshRunnerList", "data-dsh-runner-all": "1" }, sections.map(renderSection))),
           logPane),
         conflictDialog,
@@ -3675,29 +4797,29 @@ window.__ModuleLoader__.load({
           var projectColor = projectColorOf(item.projectPath, uiStateCache !== null && uiStateCache !== undefined ? uiStateCache.projectColors : undefined);
           var actions = headerActionsFor(item.status, item.hasRunner, item.external);
           var itemBusy = actionKey === item.key;
-          var hasActions = actions.start || actions.stop || actions.restart;
           var tooltip = (projectLabel === "" ? "" : projectLabel + " · ") + item.title + " · " + statusText
             + (item.ports.length > 0 ? " · 端口 " + item.ports.join("、") : "")
             + (itemError === "" ? "" : " · " + itemError);
-          function actionButton(action, label, title) {
+          function actionButton(action, iconName, label, size) {
             return h("button", {
               type: "button",
               className: "dshRunnerHeaderBtn",
               "data-action": action,
-              "aria-label": title,
+              title: label,
+              "aria-label": label + "：" + item.title,
               disabled: itemBusy,
               onClick: function (event) {
                 event.stopPropagation();
                 runHeaderAction(item, action);
               }
-            }, itemBusy ? "…" : label);
+            }, itemBusy ? null : limobIcon(iconName, size));
           }
           return h("span", {
             key: item.key,
             className: "dshRunnerHeaderChip",
             "data-status": item.status,
             "data-busy": itemBusy ? "true" : "false",
-            style: { background: projectColor.tint },
+            style: { "--drr-chip": projectColor.accent },
             "aria-label": tooltip,
             onMouseEnter: function (event) { openHoverLog(item, event.currentTarget); },
             onMouseLeave: scheduleHoverClose,
@@ -3706,14 +4828,14 @@ window.__ModuleLoader__.load({
           },
             h("span", { className: "dshRunnerDot", "data-status": item.status }),
             h("span", { className: "dshRunnerHeaderName" }, item.label !== undefined ? item.label : item.title),
-            hasActions && itemError === "" ? null : h("span", {
+            h("span", {
               className: "dshRunnerHeaderState",
               "data-status": itemError === "" ? item.status : "failed"
             }, itemError === "" ? statusText : "失败"),
             h("span", { className: "dshRunnerHeaderActions" },
-              actions.start ? actionButton("start", "▶", "启动") : null,
-              actions.stop ? actionButton("stop", "■", "停止") : null,
-              actions.restart ? actionButton("restart", "↻", "重启") : null));
+              actions.start ? actionButton("start", "play", "启动", 10) : null,
+              actions.stop ? actionButton("stop", "stop", "停止", 9) : null,
+              actions.restart ? actionButton("restart", "restart", "重启", 11) : null));
         }));
 
       if (hover === null || hover === undefined || hoverPos === null) return headerFloat;
@@ -3740,7 +4862,7 @@ window.__ModuleLoader__.load({
           h("span", { className: "dshRunnerDot", "data-status": shownItem.status }),
           h("span", { className: "dshRunnerLogBubbleTitle" }, shownItem.label !== undefined ? shownItem.label : shownItem.title),
           h("span", { className: "dshRunnerLogBubbleMeta" }, shownMeta),
-          h("span", { className: "dshRunnerLogBubbleLive" }, shownError === "" ? "● 实时" : "● 失败")),
+          h("span", { className: "dshRunnerLogBubbleLive", "data-tone": shownError === "" ? "live" : "error" }, shownError === "" ? "实时" : "失败")),
         shownError !== ""
           ? h("div", { className: "dshRunnerLogBubbleError" }, shownError)
           : (shownText === ""
@@ -3898,33 +5020,29 @@ window.__ModuleLoader__.load({
         var rowStatus = current !== null && current !== undefined && typeof current.status === "string" ? current.status : "idle";
         var rowActive = rowStatus === "queued" || rowStatus === "starting"
           || rowStatus === "running" || rowStatus === "stopping";
+        function menuAction(action, iconName, size, label, disabled) {
+          return h("button", {
+            type: "button",
+            className: "dshLimobIconBtn",
+            "data-action": action,
+            title: label + " " + command.title,
+            "aria-label": label + " " + command.title,
+            disabled: disabled,
+            onClick: function () { runAction(action, command); }
+          }, limobIcon(iconName, size));
+        }
         return h("div", { key: command.id, className: "dshLimobRunRow" },
           h("span", { className: "dshLimobRunRowMain" },
-            h("span", { className: "dshLimobRunItemTitle" }, command.title),
+            h("span", { className: "dshLimobRunItemTitleLine" },
+              h("span", { className: "dshRunnerDot", "data-status": rowStatus }),
+              h("span", { className: "dshLimobRunItemTitle" }, command.title)),
             h("span", { className: "dshLimobRunItemCmd" },
-              runnerStatusText(rowStatus) + " · " + String(command.command))),
+              h("span", { className: "dshLimobRunItemState", "data-status": rowStatus }, runnerStatusText(rowStatus)),
+              " · " + String(command.command))),
           h("span", { className: "dshLimobRunRowActions" },
-            h("button", {
-              type: "button",
-              className: "dshRunnerMiniBtn",
-              "data-action": "start",
-              disabled: busy !== null || rowActive,
-              onClick: function () { runAction("start", command); }
-            }, "启动"),
-            h("button", {
-              type: "button",
-              className: "dshRunnerMiniBtn",
-              "data-action": "stop",
-              disabled: busy !== null || !rowActive,
-              onClick: function () { runAction("stop", command); }
-            }, "停止"),
-            h("button", {
-              type: "button",
-              className: "dshRunnerMiniBtn",
-              "data-action": "restart",
-              disabled: busy !== null,
-              onClick: function () { runAction("restart", command); }
-            }, "重启")));
+            menuAction("start", "play", 12, "启动", busy !== null || rowActive),
+            menuAction("stop", "stop", 11, "停止", busy !== null || !rowActive),
+            menuAction("restart", "restart", 13, "重启", busy !== null)));
       }
 
       var menuStyle = menuPos !== null
@@ -3945,9 +5063,10 @@ window.__ModuleLoader__.load({
               h("span", null, hasProject ? String(projectPath) : "当前会话")),
             commands.length === 0
               ? h("div", { className: "dshLimobRunEmpty" },
-                  hasProject
+                  h("span", { className: "dshRunnerEmptyIcon" }, limobIcon("terminal", 18)),
+                  h("span", null, hasProject
                     ? "当前项目没有可用命令：到「设置 → dsh-runner」或左侧「运行 → 管理命令」里添加。"
-                    : "请先进入一个项目会话。")
+                    : "请先进入一个项目会话。"))
               : commands.map(renderMenuRow),
             h("div", { className: "dshLimobRunSep" }),
             h("div", { className: "dshLimobRunHint" }, "完整面板见左侧「运行」"))
@@ -3966,6 +5085,8 @@ window.__ModuleLoader__.load({
           type: "button",
           className: "dshLimobRunBtn",
           "data-busy": busy !== null ? "true" : "false",
+          "aria-haspopup": "menu",
+          "aria-expanded": menuOpen ? "true" : "false",
           title: "项目运行：启动/停止/重启（完整面板见左侧「运行」）",
           "aria-label": "运行",
           onClick: function () {
@@ -3973,7 +5094,7 @@ window.__ModuleLoader__.load({
             toggleMenu();
           }
         },
-          h("span", { "aria-hidden": "true" }, busy !== null ? "…" : "▶"),
+          limobIcon("play", 13),
           h("span", null, "运行")),
         status !== null ? h("span", {
           className: "dshLimobRunStatus",
